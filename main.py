@@ -17,6 +17,7 @@ from web_researcher import WebResearcher, WebResearchError
 from github_researcher import GitHubResearcher, GitHubResearchError
 from rag_researcher import RAGResearcher, RAGResearchError
 from evidence_layer import EvidenceLayer, EvidenceError
+from evidence_context import build_evidence_context, EvidenceContextError
 
 
 def run_pipeline_demo():
@@ -198,6 +199,7 @@ def run_pipeline_demo():
 
         # Stage 7: Evidence Layer (Normalize, Deduplicate, Rank, and Group)
         print("\n--- [Stage 7] Processing Evidence Layer ---")
+        evidence_groups = []
         if not collected_research_results:
             print("  No research results retrieved to process into evidence.\n")
         else:
@@ -246,7 +248,35 @@ def run_pipeline_demo():
                         print(f"       Excerpt: {content_preview}")
                 print()
 
-        print("  [Notice] Evidence Layer completed. Decision & Reasoning Engine are deferred to upcoming milestones.")
+        # Stage 8: Packaging EvidenceContext Contract
+        print("\n--- [Stage 8] Packaging EvidenceContext Contract ---")
+        try:
+            evidence_context = build_evidence_context(
+                user_request=request_text,
+                requirements=analysis,
+                plan=plan,
+                tasks=tasks,
+                evidence_groups=evidence_groups,
+            )
+            print("EvidenceContext Packaged Successfully:")
+            print(f"  Indexed Evidence References: {evidence_context.total_evidence_count} items ({', '.join(list(evidence_context.evidence_map.keys())[:6])}{'...' if evidence_context.total_evidence_count > 6 else ''})")
+            print(f"  Research Questions Mapped:    {len(evidence_context.evidence_groups)}")
+            print(f"  Contract Status:              VALIDATED (Deterministic Reasoning Contract Ready)\n")
+
+            if evidence_context.evidence_map:
+                print("Reasoning-Facing Citations & Provenance Sample:")
+                for ev_id, ev in list(evidence_context.evidence_map.items())[:3]:
+                    print(f"  * {ev_id} -> [{ev.source_type.upper()}] {ev.title}")
+                    print(f"    Evidence Identifier: {ev.identifier}")
+                    print(f"    Source/URL:          {ev.url or ev.source}")
+                    print(f"    Origin Task:         \"{ev.task_question}\"")
+                if evidence_context.total_evidence_count > 3:
+                    print(f"    ... and {evidence_context.total_evidence_count - 3} more indexed references.")
+            print()
+        except EvidenceContextError as err:
+            print(f"  [EvidenceContext Error]: {err}\n")
+
+        print("  [Notice] Evidence Context completed. Decision & Reasoning Engine are deferred to upcoming milestones.")
 
     print("\n" + "=" * 70)
     print("Full Pipeline Demo completed successfully.")

@@ -4,7 +4,7 @@ Data models and schemas for DEVSCOUT.
 
 import hashlib
 import re
-from typing import Any, Literal
+from typing import Any, Literal, Sequence
 from urllib.parse import urlparse
 from pydantic import BaseModel, Field, field_validator, model_validator
 
@@ -513,6 +513,10 @@ class Evidence(BaseModel):
         default_factory=dict,
         description="Source-specific metadata attributes (e.g. stars, forks, language, doc_id).",
     )
+    ev_id: str | None = Field(
+        default=None,
+        description="Reasoning-facing reference identifier (e.g. 'EV-001') assigned within an EvidenceContext.",
+    )
 
     @model_validator(mode="before")
     @classmethod
@@ -583,6 +587,18 @@ class Evidence(BaseModel):
         except (ValueError, TypeError):
             raise ValueError(f"Score must be a valid numeric value, got: {v}")
 
+    @field_validator("ev_id")
+    @classmethod
+    def validate_ev_id_format(cls, v: str | None) -> str | None:
+        if v is None:
+            return None
+        v_clean = v.strip().upper()
+        if not re.match(r"^EV-\d{3,}$", v_clean):
+            raise ValueError(
+                f"Invalid evidence reference ID format '{v}'. Expected pattern 'EV-xxx' (e.g. 'EV-001')."
+            )
+        return v_clean
+
     @property
     def description(self) -> str:
         """Alias property for content."""
@@ -642,9 +658,250 @@ class EvidenceGroup(BaseModel):
             grouped[item.source_type].append(item)
         return grouped
 
+    @property
+    def evidence_ids(self) -> list[str]:
+        """Return the list of reasoning-facing EV reference IDs for items in this group."""
+        return [e.ev_id for e in self.items if e.ev_id]
+
     def to_dict(self) -> dict[str, Any]:
         """Convert the group into a standard Python dictionary."""
         return self.model_dump()
+
+
+class EvidenceReferenceError(KeyError):
+    """Raised when an evidence reference ID (e.g. 'EV-007') cannot be found or resolved in an EvidenceContext."""
+    pass
+
+
+class EvidenceContext(BaseModel):
+    """
+    Validated research context packaging the original request, requirement analysis,
+    plan, atomic tasks, and grouped evidence with reasoning-facing EV reference IDs.
+    Establishes the deterministic contract consumed by the future Reasoning Engine.
+    """
+    user_request: str = Field(
+        ...,
+        description="The original, raw technical request submitted by the user.",
+        min_length=1,
+    )
+    requirements: RequirementAnalysis = Field(
+        ...,
+        description="Validated technical requirements extracted from the user request.",
+    )
+    plan: ResearchPlan = Field(
+        ...,
+        description="Validated research plan containing prioritized questions.",
+    )
+    tasks: list[ResearchTask] = Field(
+        ...,
+        description="List of atomic, executable research tasks across connectors.",
+        min_length=1,
+    )
+    evidence_groups: list[EvidenceGroup] = Field(
+        default_factory=list,
+        description="Evidence items grouped under their corresponding research questions.",
+    )
+    evidence_map: dict[str, Evidence] = Field(
+        default_factory=dict,
+        description="Lookup map resolving reasoning-facing references ('EV-001') to Evidence objects.",
+    )
+
+    @field_validator("user_request")
+    @classmethod
+    def validate_user_request(cls, v: str) -> str:
+        if not isinstance(v, str) or not v.strip():
+            raise ValueError("user_request cannot be empty or whitespace only.")
+        return v.strip()
+
+    @field_validator("tasks")
+    @classmethod
+    def validate_tasks_list(cls, v: list[ResearchTask]) -> list[ResearchTask]:
+        if not v:
+            raise ValueError("EvidenceContext requires at least one ResearchTask.")
+        for idx, task in enumerate(v):
+            if not isinstance(task, ResearchTask):
+                raise ValueError(f"Task at index {idx} is not a ResearchTask instance.")
+        return v
+
+    @model_validator(mode="before")
+    @classmethod
+    def auto_index_evidence(cls, data: Any) -> Any:
+        if not isinstance(data, dict):
+            return data
+
+        groups = data.get("evidence_groups") or []
+        evidence_map = data.get("evidence_map") or {}
+
+        # If evidence_map is empty or missing, auto-index deterministically from groups
+        if not evidence_map and groups:
+            indexed_map: dict[str, Any] = {}
+            seen_identifiers: dict[str, str] = {}  # identifier -> ev_id
+
+            for group in groups:
+                items = group.items if hasattr(group, "items") else (group.get("items", []) if isinstance(group, dict) else [])
+                for item in items:
+                    ident = item.identifier if hasattr(item, "identifier") else (item.get("identifier") if isinstance(item, dict) else None)
+                    if not ident:
+                        continue
+                    if ident in seen_identifiers:
+                        assigned_id = seen_identifiers[ident]
+                        if hasattr(item, "ev_id"):
+                            item.ev_id = assigned_id
+                        elif isinstance(item, dict):
+                            item["ev_id"] = assigned_id
+                    else:
+                        existing_ev_id = getattr(item, "ev_id", None) or (item.get("ev_id") if isinstance(item, dict) else None)
+                        if existing_ev_id and re.match(r"^EV-\d{3,}$", str(existing_ev_id).upper()):
+                            assigned_id = str(existing_ev_id).upper()
+                        else:
+                            assigned_id = f"EV-{len(seen_identifiers) + 1:03d}"
+
+                        if hasattr(item, "ev_id"):
+                            item.ev_id = assigned_id
+                        elif isinstance(item, dict):
+                            item["ev_id"] = assigned_id
+
+                        seen_identifiers[ident] = assigned_id
+                        indexed_map[assigned_id] = item
+
+            data["evidence_map"] = indexed_map
+
+        return data
+
+    @field_validator("evidence_map")
+    @classmethod
+    def validate_evidence_map(cls, v: dict[str, Evidence]) -> dict[str, Evidence]:
+        for ref_id, item in v.items():
+            if not re.match(r"^EV-\d{3,}$", ref_id):
+                raise ValueError(
+                    f"Invalid evidence reference key '{ref_id}' in evidence_map. Expected pattern 'EV-xxx' (e.g. 'EV-001')."
+                )
+            if not isinstance(item, Evidence):
+                raise ValueError(
+                    f"Evidence map entry for '{ref_id}' must be an Evidence instance, got {type(item).__name__}."
+                )
+            if item.ev_id and item.ev_id != ref_id:
+                raise ValueError(
+                    f"Mismatched evidence reference: key is '{ref_id}' but Evidence item has ev_id='{item.ev_id}'."
+                )
+        return v
+
+    def get_evidence(self, ev_id: str) -> Evidence:
+        """
+        Retrieve an Evidence item by its reasoning-facing reference ID (e.g. 'EV-001').
+        Raises EvidenceReferenceError if the reference is not found.
+        """
+        ref_clean = ev_id.strip().upper()
+        if ref_clean not in self.evidence_map:
+            raise EvidenceReferenceError(
+                f"Evidence reference '{ev_id}' not found in EvidenceContext. "
+                f"Available references: {list(self.evidence_map.keys())}"
+            )
+        return self.evidence_map[ref_clean]
+
+    def resolve_reference(self, ev_id: str) -> Evidence:
+        """Alias for get_evidence."""
+        return self.get_evidence(ev_id)
+
+    def resolve_references(self, ev_ids: Sequence[str]) -> list[Evidence]:
+        """
+        Resolve a sequence of reasoning-facing references (e.g. ['EV-001', 'EV-003'])
+        into their underlying Evidence objects. Raises EvidenceReferenceError if any ID is missing.
+        """
+        return [self.get_evidence(ref_id) for ref_id in ev_ids]
+
+    def get_evidence_by_identifier(self, identifier: str) -> Evidence | None:
+        """
+        Lookup an evidence item by its underlying technical identifier (e.g. 'github:owner/repo').
+        """
+        ident_clean = identifier.strip().lower()
+        for ev in self.evidence_map.values():
+            if ev.identifier.strip().lower() == ident_clean:
+                return ev
+        return None
+
+    def get_group_for_question(self, question: str) -> EvidenceGroup | None:
+        """Retrieve the evidence group matching the given research question."""
+        q_clean = question.strip().lower()
+        for group in self.evidence_groups:
+            if group.task_question.strip().lower() == q_clean:
+                return group
+        return None
+
+    def get_evidence_ids_for_question(self, question: str) -> list[str]:
+        """
+        Return the reasoning-facing EV reference IDs for all evidence items
+        associated with a research question.
+        """
+        group = self.get_group_for_question(question)
+        if not group:
+            return []
+        return [e.ev_id for e in group.items if e.ev_id]
+
+    @property
+    def total_evidence_count(self) -> int:
+        """Total number of unique indexed evidence items."""
+        return len(self.evidence_map)
+
+    def to_reasoning_summary(self) -> dict[str, Any]:
+        """
+        Produce a clean, structured summary mapping research questions to their
+        reasoning-facing evidence IDs.
+        """
+        return {
+            "user_request": self.user_request,
+            "goal": self.requirements.goal,
+            "total_tasks": len(self.tasks),
+            "total_evidence_items": self.total_evidence_count,
+            "questions": [
+                {
+                    "question": g.task_question,
+                    "evidence_ids": [e.ev_id for e in g.items if e.ev_id],
+                    "evidence_count": g.total_count,
+                    "breakdown": {
+                        "web": g.web_count,
+                        "github": g.github_count,
+                        "rag": g.rag_count,
+                    },
+                }
+                for g in self.evidence_groups
+            ],
+        }
+
+    def format_for_reasoning(self) -> str:
+        """
+        Format the evidence context into a clean, markdown representation
+        ready for the future Reasoning Engine.
+        """
+        lines: list[str] = [
+            f"# Technical Research Context",
+            f"**Goal**: {self.requirements.goal}",
+            f"**Technologies**: {', '.join(self.requirements.technologies) if self.requirements.technologies else 'None specified'}",
+            f"",
+            f"## Research Questions & Indexed Evidence",
+        ]
+
+        for q_idx, group in enumerate(self.evidence_groups, start=1):
+            lines.append(f"### Question {q_idx}: {group.task_question}")
+            if not group.items:
+                lines.append("  *(No evidence retrieved for this question)*")
+            else:
+                for item in group.items:
+                    ref_tag = f"[{item.ev_id}]" if item.ev_id else "[EV-???]"
+                    src_badge = f"({item.source_type.upper()})"
+                    score_info = f" [Score: {item.rank_score:.3f}]" if item.rank_score else ""
+                    lines.append(f"- **{ref_tag}** {src_badge} *{item.title}*{score_info}")
+                    if item.url:
+                        lines.append(f"  Source URL: {item.url}")
+                    lines.append(f"  Excerpt: {item.content}")
+            lines.append("")
+
+        return "\n".join(lines).strip()
+
+    def to_dict(self) -> dict[str, Any]:
+        """Convert the context model into a standard Python dictionary."""
+        return self.model_dump()
+
 
 
 
