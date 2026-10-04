@@ -205,7 +205,8 @@ IMPORTANT:
         If overall_confidence is missing:
           - If recommendation.confidence exists, copy that value into overall_confidence.
           - Otherwise derive it deterministically from available finding/recommendation confidence values.
-          - If there is no usable confidence value, preserve the existing validation failure rather than inventing one.
+          - If there is no usable confidence value, default to "low" because the report
+            has no evidence-backed confidence signal.
         """
         raw_overall = data.get("overall_confidence")
         is_missing = (
@@ -249,6 +250,8 @@ IMPORTANT:
                     rev = {1: "low", 2: "medium", 3: "high"}
                     avg_score = round(sum(weights[c] for c in usable_confidences) / len(usable_confidences))
                     data["overall_confidence"] = rev[avg_score]
+                else:
+                    data["overall_confidence"] = "low"
 
         return data
 

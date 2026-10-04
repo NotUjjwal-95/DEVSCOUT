@@ -592,16 +592,17 @@ Let me know if you need any adjustments."""
         self.assertIsInstance(report, DecisionReport)
         self.assertEqual(report.overall_confidence, "medium")
 
-    def test_parse_and_validate_missing_overall_confidence_no_usable_confidence_fails(self):
+    def test_parse_and_validate_missing_overall_confidence_without_confidence_defaults_low(self):
         json_no_usable_conf = json.dumps({
             "summary": "Summary without any usable confidence in recommendation or findings.",
             "findings": [],
             "recommendation": None,
         })
-        with self.assertRaises(GeminiReasoningValidationError) as cm:
-            self.engine._parse_and_validate(json_no_usable_conf, self.context)
-        self.assertIn("overall_confidence", str(cm.exception))
-        self.assertIn("Field required", str(cm.exception))
+        report = self.engine._parse_and_validate(json_no_usable_conf, self.context)
+        self.assertIsInstance(report, DecisionReport)
+        self.assertIsNone(report.recommendation)
+        self.assertEqual(report.findings, [])
+        self.assertEqual(report.overall_confidence, "low")
 
     def test_parse_and_validate_missing_overall_confidence_invalid_evidence_ref_still_fails(self):
         json_missing_overall_bad_ev = json.dumps({
@@ -630,4 +631,3 @@ Let me know if you need any adjustments."""
 
 if __name__ == "__main__":
     unittest.main()
-
