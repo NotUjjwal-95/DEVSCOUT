@@ -199,6 +199,59 @@ IMPORTANT:
             cleaned = cleaned.strip()
         return cleaned
 
+    def _normalize_response_data(self, data: dict[str, Any]) -> dict[str, Any]:
+        """
+        Normalize raw parsed JSON response from Gemini before Pydantic schema validation.
+        If overall_confidence is missing:
+          - If recommendation.confidence exists, copy that value into overall_confidence.
+          - Otherwise derive it deterministically from available finding/recommendation confidence values.
+          - If there is no usable confidence value, preserve the existing validation failure rather than inventing one.
+        """
+        raw_overall = data.get("overall_confidence")
+        is_missing = (
+            "overall_confidence" not in data
+            or raw_overall is None
+            or (isinstance(raw_overall, str) and not raw_overall.strip())
+        )
+
+        if is_missing:
+            # 1. If recommendation.confidence exists, copy that value into overall_confidence
+            rec = data.get("recommendation")
+            copied = False
+            if isinstance(rec, dict) and "confidence" in rec and rec["confidence"] is not None:
+                rec_conf = rec["confidence"]
+                if isinstance(rec_conf, str) and rec_conf.strip():
+                    data["overall_confidence"] = rec_conf.strip()
+                    copied = True
+                elif rec_conf:
+                    data["overall_confidence"] = rec_conf
+                    copied = True
+
+            # 2. Otherwise derive it deterministically from available finding/recommendation confidence values
+            if not copied:
+                usable_confidences: list[str] = []
+
+                if isinstance(rec, dict):
+                    rc = rec.get("confidence")
+                    if isinstance(rc, str) and rc.strip().lower() in ("high", "medium", "low"):
+                        usable_confidences.append(rc.strip().lower())
+
+                findings = data.get("findings")
+                if isinstance(findings, list):
+                    for f in findings:
+                        if isinstance(f, dict):
+                            fc = f.get("confidence")
+                            if isinstance(fc, str) and fc.strip().lower() in ("high", "medium", "low"):
+                                usable_confidences.append(fc.strip().lower())
+
+                if usable_confidences:
+                    weights = {"low": 1, "medium": 2, "high": 3}
+                    rev = {1: "low", 2: "medium", 3: "high"}
+                    avg_score = round(sum(weights[c] for c in usable_confidences) / len(usable_confidences))
+                    data["overall_confidence"] = rev[avg_score]
+
+        return data
+
     def _parse_and_validate(self, raw_content: str | None, context: EvidenceContext) -> DecisionReport:
         """
         Parse raw content and validate against the DecisionReport schema,
@@ -209,33 +262,37 @@ IMPORTANT:
 
         cleaned = self._clean_json_text(raw_content)
 
-        report: DecisionReport | None = None
-
-        # Attempt 1: Direct Pydantic validation
+        # 1. Parse the JSON object first
+        data: Any = None
         try:
-            report = DecisionReport.model_validate_json(cleaned)
+            data = json.loads(cleaned)
         except Exception:
-            pass
-
-        # Attempt 2: Extract outermost JSON object if model included surrounding commentary
-        if report is None:
             match = re.search(r"\{.*\}", cleaned, re.DOTALL)
             if match:
                 try:
-                    report = DecisionReport.model_validate_json(match.group(0))
-                except Exception as e:
-                    raise GeminiReasoningValidationError(
-                        f"Model output matched JSON syntax but failed schema validation: {e}",
-                        raw_response=raw_content,
-                    ) from e
+                    data = json.loads(match.group(0))
+                except Exception:
+                    pass
 
-        if report is None:
+        if not isinstance(data, dict):
             raise GeminiReasoningValidationError(
                 "Could not parse valid JSON from the model response.",
                 raw_response=raw_content,
             )
 
-        # Deterministic evidence reference validation against EvidenceContext
+        # 2. Normalize JSON response before Pydantic validation
+        data = self._normalize_response_data(data)
+
+        # 3. Pass the normalized object through DecisionReport.model_validate(...)
+        try:
+            report = DecisionReport.model_validate(data)
+        except Exception as e:
+            raise GeminiReasoningValidationError(
+                f"Model output matched JSON syntax but failed schema validation: {e}",
+                raw_response=raw_content,
+            ) from e
+
+        # 4. Deterministic evidence reference validation against EvidenceContext
         try:
             report.validate_evidence_references(context)
         except (DecisionReportValidationError, EvidenceReferenceError) as e:

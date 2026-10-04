@@ -540,6 +540,94 @@ Let me know if you need any adjustments."""
         self.assertTrue(issubclass(GeminiReasoningValidationError, ReasoningValidationError))
         self.assertTrue(issubclass(GeminiReasoningValidationError, ValueError))
 
+    # -----------------------------------------------------------------------
+    # 15. Normalization of missing overall_confidence
+    # -----------------------------------------------------------------------
+    def test_parse_and_validate_missing_overall_confidence_copies_recommendation_confidence(self):
+        json_without_overall_conf = json.dumps({
+            "summary": "FastAPI is recommended for low-latency asynchronous API services.",
+            "findings": [
+                {
+                    "question": self.q1.question,
+                    "finding": "Throughput satisfies architectural targets.",
+                    "reasoning": "EV-001 shows high concurrency support.",
+                    "evidence_references": ["EV-001"],
+                    "confidence": "high",
+                }
+            ],
+            "recommendation": {
+                "option": "FastAPI",
+                "reason": "Meets performance, validation, and documentation criteria.",
+                "evidence_references": ["EV-001"],
+                "confidence": "high",
+            },
+        })
+        report = self.engine._parse_and_validate(json_without_overall_conf, self.context)
+        self.assertIsInstance(report, DecisionReport)
+        self.assertEqual(report.overall_confidence, "high")
+        self.assertEqual(report.recommendation.confidence, "high")
+
+    def test_parse_and_validate_missing_overall_confidence_derives_from_findings(self):
+        json_without_overall_conf_no_rec = json.dumps({
+            "summary": "Evidence is inconclusive for a definitive framework recommendation.",
+            "findings": [
+                {
+                    "question": self.q1.question,
+                    "finding": "Measured latency is within acceptable tolerance.",
+                    "reasoning": "EV-001 benchmark demonstrates stable latency.",
+                    "evidence_references": ["EV-001"],
+                    "confidence": "medium",
+                }
+            ],
+            "recommendation": None,
+            "uncertainties": [
+                {
+                    "topic": "Long term support",
+                    "reason": "No evidence gathered on LTS commitments.",
+                    "impact": "May affect upgrade lifecycle.",
+                }
+            ],
+        })
+        report = self.engine._parse_and_validate(json_without_overall_conf_no_rec, self.context)
+        self.assertIsInstance(report, DecisionReport)
+        self.assertEqual(report.overall_confidence, "medium")
+
+    def test_parse_and_validate_missing_overall_confidence_no_usable_confidence_fails(self):
+        json_no_usable_conf = json.dumps({
+            "summary": "Summary without any usable confidence in recommendation or findings.",
+            "findings": [],
+            "recommendation": None,
+        })
+        with self.assertRaises(GeminiReasoningValidationError) as cm:
+            self.engine._parse_and_validate(json_no_usable_conf, self.context)
+        self.assertIn("overall_confidence", str(cm.exception))
+        self.assertIn("Field required", str(cm.exception))
+
+    def test_parse_and_validate_missing_overall_confidence_invalid_evidence_ref_still_fails(self):
+        json_missing_overall_bad_ev = json.dumps({
+            "summary": "Valid summary.",
+            "findings": [
+                {
+                    "question": self.q1.question,
+                    "finding": "Valid finding citing non-existent evidence.",
+                    "reasoning": "Reasoning citing EV-999.",
+                    "evidence_references": ["EV-999"],
+                    "confidence": "high",
+                }
+            ],
+            "recommendation": {
+                "option": "Option A",
+                "reason": "Good choice.",
+                "evidence_references": ["EV-001"],
+                "confidence": "high",
+            },
+        })
+        with self.assertRaises(GeminiReasoningValidationError) as cm:
+            self.engine._parse_and_validate(json_missing_overall_bad_ev, self.context)
+        self.assertIn("EV-999", str(cm.exception))
+        self.assertIn("reference not found", str(cm.exception))
+
 
 if __name__ == "__main__":
     unittest.main()
+
