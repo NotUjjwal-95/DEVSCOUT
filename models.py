@@ -1070,6 +1070,530 @@ class EvidenceContext(BaseModel):
         return self.model_dump()
 
 
+# ---------------------------------------------------------------------------
+# Decision Report Models (Milestone: DecisionReport Contract)
+# ---------------------------------------------------------------------------
+
+Confidence = Literal["high", "medium", "low"]
+
+
+class DecisionReportError(Exception):
+    """Base exception for all DecisionReport contract errors."""
+    pass
+
+
+class DecisionReportValidationError(EvidenceReferenceError, DecisionReportError, ValueError):
+    """Raised when DecisionReport validation against EvidenceContext fails."""
+    pass
+
+
+def _validate_non_empty_str(v: str, field_name: str = "Field") -> str:
+    if not isinstance(v, str) or not v.strip():
+        raise ValueError(f"{field_name} cannot be empty or whitespace only.")
+    return v.strip()
+
+
+def _validate_evidence_references(v: list[str]) -> list[str]:
+    if not isinstance(v, list):
+        raise ValueError("evidence_references must be a list of strings.")
+    seen: set[str] = set()
+    cleaned: list[str] = []
+    for ref in v:
+        if not isinstance(ref, str) or not ref.strip():
+            raise ValueError("Evidence reference cannot be empty or whitespace only.")
+        ref_clean = ref.strip().upper()
+        if not re.match(r"^EV-\d{3,}$", ref_clean):
+            raise ValueError(
+                f"Invalid evidence reference format '{ref}'. Expected pattern 'EV-xxx' (e.g. 'EV-001')."
+            )
+        if ref_clean in seen:
+            raise ValueError(
+                f"Duplicate evidence reference '{ref_clean}' in claim. Evidence references within a single item must be unique."
+            )
+        seen.add(ref_clean)
+        cleaned.append(ref_clean)
+    return cleaned
+
+
+class Finding(BaseModel):
+    """
+    A defensible conclusion about one research question supported by evidence references.
+    """
+    question: str = Field(
+        ...,
+        description="The research question this finding directly answers.",
+        min_length=1,
+    )
+    finding: str = Field(
+        ...,
+        description="Substantive technical finding or conclusion.",
+        min_length=1,
+    )
+    reasoning: str = Field(
+        ...,
+        description="Chain of reasoning connecting the evidence to the finding.",
+        min_length=1,
+    )
+    evidence_references: list[str] = Field(
+        default_factory=list,
+        description="Reasoning-facing citation references ('EV-001', 'EV-002') supporting this finding.",
+    )
+    confidence: Confidence = Field(
+        ...,
+        description="Confidence level in this finding: 'high', 'medium', or 'low'.",
+    )
+
+    @field_validator("question", "finding", "reasoning")
+    @classmethod
+    def validate_strings(cls, v: str) -> str:
+        return _validate_non_empty_str(v)
+
+    @field_validator("evidence_references")
+    @classmethod
+    def validate_refs(cls, v: list[str]) -> list[str]:
+        return _validate_evidence_references(v)
+
+    def to_dict(self) -> dict[str, Any]:
+        """Convert the model into a standard Python dictionary."""
+        return self.model_dump()
+
+
+class ComparisonAssessment(BaseModel):
+    """
+    Assessment of a specific technical option against a comparison criterion.
+    """
+    option: str = Field(
+        ...,
+        description="Technology or option being assessed (e.g. 'Kafka', 'Kinesis').",
+        min_length=1,
+    )
+    assessment: str = Field(
+        ...,
+        description="Technical assessment of this option under the criterion.",
+        min_length=1,
+    )
+    evidence_references: list[str] = Field(
+        default_factory=list,
+        description="Evidence references supporting this assessment.",
+    )
+
+    @field_validator("option", "assessment")
+    @classmethod
+    def validate_strings(cls, v: str) -> str:
+        return _validate_non_empty_str(v)
+
+    @field_validator("evidence_references")
+    @classmethod
+    def validate_refs(cls, v: list[str]) -> list[str]:
+        return _validate_evidence_references(v)
+
+    def to_dict(self) -> dict[str, Any]:
+        """Convert the model into a standard Python dictionary."""
+        return self.model_dump()
+
+
+class Comparison(BaseModel):
+    """
+    Comparison criterion and assessments of candidate options.
+    """
+    criterion: str = Field(
+        ...,
+        description="Criterion or dimension of comparison (e.g. 'Throughput Latency', 'Infrastructure Cost').",
+        min_length=1,
+    )
+    assessments: list[ComparisonAssessment] = Field(
+        ...,
+        description="Assessments for each candidate option under this criterion.",
+        min_length=1,
+    )
+
+    @field_validator("criterion")
+    @classmethod
+    def validate_strings(cls, v: str) -> str:
+        return _validate_non_empty_str(v)
+
+    @field_validator("assessments")
+    @classmethod
+    def validate_assessments(cls, v: list[ComparisonAssessment]) -> list[ComparisonAssessment]:
+        if not v:
+            raise ValueError("Comparison must contain at least one assessment.")
+        for idx, a in enumerate(v):
+            if not isinstance(a, ComparisonAssessment):
+                raise ValueError(f"Assessment at index {idx} must be a ComparisonAssessment instance.")
+        return v
+
+    def to_dict(self) -> dict[str, Any]:
+        """Convert the model into a standard Python dictionary."""
+        return self.model_dump()
+
+
+class Recommendation(BaseModel):
+    """
+    A context-aware, conditional engineering recommendation supported by evidence.
+    """
+    option: str = Field(
+        ...,
+        description="Recommended technology, architecture, or approach.",
+        min_length=1,
+    )
+    reason: str = Field(
+        ...,
+        description="Detailed contextual rationale justifying why this option is recommended given requirements and constraints.",
+        min_length=1,
+    )
+    evidence_references: list[str] = Field(
+        default_factory=list,
+        description="Evidence references supporting this recommendation.",
+    )
+    confidence: Confidence = Field(
+        ...,
+        description="Confidence level in this recommendation: 'high', 'medium', or 'low'.",
+    )
+
+    @field_validator("option", "reason")
+    @classmethod
+    def validate_strings(cls, v: str) -> str:
+        return _validate_non_empty_str(v)
+
+    @field_validator("evidence_references")
+    @classmethod
+    def validate_refs(cls, v: list[str]) -> list[str]:
+        return _validate_evidence_references(v)
+
+    def to_dict(self) -> dict[str, Any]:
+        """Convert the model into a standard Python dictionary."""
+        return self.model_dump()
+
+
+class Alternative(BaseModel):
+    """
+    A viable alternative technology or approach with conditions under which it should be chosen instead.
+    """
+    option: str = Field(
+        ...,
+        description="Alternative technology or approach.",
+        min_length=1,
+    )
+    reason: str = Field(
+        ...,
+        description="Circumstances or requirements under which this alternative becomes preferred.",
+        min_length=1,
+    )
+    evidence_references: list[str] = Field(
+        default_factory=list,
+        description="Evidence references supporting this alternative.",
+    )
+
+    @field_validator("option", "reason")
+    @classmethod
+    def validate_strings(cls, v: str) -> str:
+        return _validate_non_empty_str(v)
+
+    @field_validator("evidence_references")
+    @classmethod
+    def validate_refs(cls, v: list[str]) -> list[str]:
+        return _validate_evidence_references(v)
+
+    def to_dict(self) -> dict[str, Any]:
+        """Convert the model into a standard Python dictionary."""
+        return self.model_dump()
+
+
+class Tradeoff(BaseModel):
+    """
+    A key engineering trade-off comparing the gain vs the cost of a decision.
+    """
+    decision: str = Field(
+        ...,
+        description="The technical choice or design decision.",
+        min_length=1,
+    )
+    gain: str = Field(
+        ...,
+        description="What is gained (benefits, guarantees, throughput, simplicity).",
+        min_length=1,
+    )
+    cost: str = Field(
+        ...,
+        description="What is sacrificed (overhead, complexity, operational burden, financial cost).",
+        min_length=1,
+    )
+    evidence_references: list[str] = Field(
+        default_factory=list,
+        description="Evidence references backing this trade-off analysis.",
+    )
+
+    @field_validator("decision", "gain", "cost")
+    @classmethod
+    def validate_strings(cls, v: str) -> str:
+        return _validate_non_empty_str(v)
+
+    @field_validator("evidence_references")
+    @classmethod
+    def validate_refs(cls, v: list[str]) -> list[str]:
+        return _validate_evidence_references(v)
+
+    def to_dict(self) -> dict[str, Any]:
+        """Convert the model into a standard Python dictionary."""
+        return self.model_dump()
+
+
+class Risk(BaseModel):
+    """
+    An identified technical or operational risk and its potential impact.
+    """
+    risk: str = Field(
+        ...,
+        description="Description of the technical, architectural, or operational risk.",
+        min_length=1,
+    )
+    impact: str = Field(
+        ...,
+        description="Potential consequence or impact if this risk materializes.",
+        min_length=1,
+    )
+    evidence_references: list[str] = Field(
+        default_factory=list,
+        description="Evidence references documenting or illustrating this risk.",
+    )
+
+    @field_validator("risk", "impact")
+    @classmethod
+    def validate_strings(cls, v: str) -> str:
+        return _validate_non_empty_str(v)
+
+    @field_validator("evidence_references")
+    @classmethod
+    def validate_refs(cls, v: list[str]) -> list[str]:
+        return _validate_evidence_references(v)
+
+    def to_dict(self) -> dict[str, Any]:
+        """Convert the model into a standard Python dictionary."""
+        return self.model_dump()
+
+
+class EvidenceConflict(BaseModel):
+    """
+    Identified disagreement or contradiction across gathered evidence sources.
+    """
+    topic: str = Field(
+        ...,
+        description="The subject or claim where evidence conflicts.",
+        min_length=1,
+    )
+    evidence_references: list[str] = Field(
+        default_factory=list,
+        description="Conflicting evidence references demonstrating the divergence.",
+    )
+    assessment: str = Field(
+        ...,
+        description="Analysis of why sources disagree (e.g. differing benchmark setups, dated info).",
+        min_length=1,
+    )
+
+    @field_validator("topic", "assessment")
+    @classmethod
+    def validate_strings(cls, v: str) -> str:
+        return _validate_non_empty_str(v)
+
+    @field_validator("evidence_references")
+    @classmethod
+    def validate_refs(cls, v: list[str]) -> list[str]:
+        return _validate_evidence_references(v)
+
+    def to_dict(self) -> dict[str, Any]:
+        """Convert the model into a standard Python dictionary."""
+        return self.model_dump()
+
+
+class Uncertainty(BaseModel):
+    """
+    An unresolved technical unknown or area of insufficient evidence.
+    Does NOT require evidence references because an uncertainty often exists precisely
+    because evidence is absent or missing.
+    """
+    topic: str = Field(
+        ...,
+        description="The subject or question that remains uncertain.",
+        min_length=1,
+    )
+    reason: str = Field(
+        ...,
+        description="Why this cannot be determined with current evidence.",
+        min_length=1,
+    )
+    impact: str = Field(
+        ...,
+        description="Impact of this uncertainty on the overall engineering decision.",
+        min_length=1,
+    )
+
+    @field_validator("topic", "reason", "impact")
+    @classmethod
+    def validate_strings(cls, v: str) -> str:
+        return _validate_non_empty_str(v)
+
+    def to_dict(self) -> dict[str, Any]:
+        """Convert the model into a standard Python dictionary."""
+        return self.model_dump()
+
+
+class DecisionReport(BaseModel):
+    """
+    Comprehensive, evidence-backed decision report produced by the Reasoning Engine.
+    Packages findings, option comparisons, recommendations, trade-offs, risks,
+    conflicts, and uncertainties.
+    """
+    summary: str = Field(
+        ...,
+        description="Executive summary of the technical decision analysis.",
+        min_length=1,
+    )
+    findings: list[Finding] = Field(
+        default_factory=list,
+        description="Substantive findings for each research question.",
+    )
+    comparisons: list[Comparison] = Field(
+        default_factory=list,
+        description="Criterion-by-criterion option comparisons.",
+    )
+    recommendation: Recommendation | None = Field(
+        default=None,
+        description="Primary context-aware recommendation, or None if evidence is insufficient.",
+    )
+    alternatives: list[Alternative] = Field(
+        default_factory=list,
+        description="Viable alternative options and conditions under which to select them.",
+    )
+    tradeoffs: list[Tradeoff] = Field(
+        default_factory=list,
+        description="Key engineering trade-offs evaluated.",
+    )
+    risks: list[Risk] = Field(
+        default_factory=list,
+        description="Technical and operational risks.",
+    )
+    conflicts: list[EvidenceConflict] = Field(
+        default_factory=list,
+        description="Disagreements across evidence sources.",
+    )
+    uncertainties: list[Uncertainty] = Field(
+        default_factory=list,
+        description="Unresolved questions or areas of missing evidence.",
+    )
+    overall_confidence: Confidence = Field(
+        ...,
+        description="Overall confidence level in the decision: 'high', 'medium', or 'low'.",
+    )
+
+    @field_validator("summary")
+    @classmethod
+    def validate_summary(cls, v: str) -> str:
+        return _validate_non_empty_str(v, "summary")
+
+    def validate_evidence_references(self, context: EvidenceContext) -> None:
+        """
+        Deterministically validate that all evidence references cited across all sections
+        resolve to valid Evidence objects in the provided EvidenceContext.
+
+        Raises DecisionReportValidationError if any reference cannot be resolved.
+        """
+        if not isinstance(context, EvidenceContext):
+            raise TypeError(
+                f"Expected EvidenceContext instance, got {type(context).__name__}."
+            )
+
+        def _check_ref(ref: str, location: str) -> None:
+            try:
+                context.resolve_reference(ref)
+            except (EvidenceReferenceError, KeyError) as e:
+                raise DecisionReportValidationError(
+                    f"Unknown evidence reference '{ref}' in {location}: reference not found in EvidenceContext. "
+                    f"Available references: {list(context.evidence_map.keys())}"
+                ) from e
+
+        # 1. Findings
+        for idx, f in enumerate(self.findings, start=1):
+            for ref in f.evidence_references:
+                _check_ref(ref, f"finding {idx} ('{f.question}')")
+
+        # 2. Comparisons
+        for c_idx, comp in enumerate(self.comparisons, start=1):
+            for a_idx, a in enumerate(comp.assessments, start=1):
+                for ref in a.evidence_references:
+                    _check_ref(
+                        ref,
+                        f"comparison '{comp.criterion}' assessment {a_idx} for '{a.option}'",
+                    )
+
+        # 3. Recommendation
+        if self.recommendation is not None:
+            for ref in self.recommendation.evidence_references:
+                _check_ref(ref, f"recommendation for '{self.recommendation.option}'")
+
+        # 4. Alternatives
+        for idx, alt in enumerate(self.alternatives, start=1):
+            for ref in alt.evidence_references:
+                _check_ref(ref, f"alternative {idx} ('{alt.option}')")
+
+        # 5. Tradeoffs
+        for idx, t in enumerate(self.tradeoffs, start=1):
+            for ref in t.evidence_references:
+                _check_ref(ref, f"tradeoff {idx} ('{t.decision}')")
+
+        # 6. Risks
+        for idx, r in enumerate(self.risks, start=1):
+            for ref in r.evidence_references:
+                _check_ref(ref, f"risk {idx} ('{r.risk}')")
+
+        # 7. Conflicts
+        for idx, c in enumerate(self.conflicts, start=1):
+            for ref in c.evidence_references:
+                _check_ref(ref, f"evidence conflict {idx} ('{c.topic}')")
+
+    @property
+    def all_evidence_references(self) -> list[str]:
+        """Return all unique reasoning-facing evidence references cited across all sections of this report."""
+        refs: list[str] = []
+        seen: set[str] = set()
+
+        def _add(ref_list: list[str]) -> None:
+            for r in ref_list:
+                if r not in seen:
+                    seen.add(r)
+                    refs.append(r)
+
+        for f in self.findings:
+            _add(f.evidence_references)
+        for comp in self.comparisons:
+            for a in comp.assessments:
+                _add(a.evidence_references)
+        if self.recommendation:
+            _add(self.recommendation.evidence_references)
+        for alt in self.alternatives:
+            _add(alt.evidence_references)
+        for t in self.tradeoffs:
+            _add(t.evidence_references)
+        for r in self.risks:
+            _add(r.evidence_references)
+        for c in self.conflicts:
+            _add(c.evidence_references)
+
+        return refs
+
+    def to_dict(self) -> dict[str, Any]:
+        """Convert the model into a standard Python dictionary."""
+        return self.model_dump()
+
+
+def validate_decision_report_evidence(report: DecisionReport, context: EvidenceContext) -> None:
+    """Convenience helper to validate a DecisionReport against an EvidenceContext."""
+    if not isinstance(report, DecisionReport):
+        raise TypeError(f"Expected DecisionReport instance, got {type(report).__name__}.")
+    report.validate_evidence_references(context)
+
+
+
 
 
 
