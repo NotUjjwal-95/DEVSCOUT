@@ -1,6 +1,6 @@
 """
 DEVSCOUT - AI-powered technical research and decision assistant.
-Integrated Demo: Requirement Analysis -> Research Planning -> Task Generation
+Integrated Demo: Requirement Analysis -> Research Planning -> Task Generation -> Web Research
 """
 
 import sys
@@ -13,11 +13,12 @@ if sys.stdout.encoding and sys.stdout.encoding.lower() != "utf-8":
 from analyzer import RequirementAnalyzer, AnalyzerError
 from planner import ResearchPlanner, PlannerError
 from task_generator import TaskGenerator
+from web_researcher import WebResearcher, WebResearchError
 
 
 def run_pipeline_demo():
     print("=" * 70)
-    print("DEVSCOUT: Requirements -> Plan -> Research Tasks Pipeline")
+    print("DEVSCOUT: Requirements -> Plan -> Tasks -> Web Research Pipeline")
     print("=" * 70)
 
     # Sample Request 1: Collaborative Whiteboard
@@ -45,7 +46,8 @@ def run_pipeline_demo():
         analyzer = RequirementAnalyzer()
         planner = ResearchPlanner()
         task_generator = TaskGenerator()
-    except (AnalyzerError, PlannerError) as e:
+        web_researcher = WebResearcher(max_results_per_task=3)
+    except (AnalyzerError, PlannerError, WebResearchError) as e:
         print(f"[Error initializing components]: {e}")
         return
 
@@ -81,16 +83,45 @@ def run_pipeline_demo():
         # Stage 3: Research Task Generation
         print("\n--- [Stage 3] Generating Executable Research Tasks ---")
         tasks = task_generator.generate_tasks(plan)
-        print(f"\nGenerated {len(tasks)} Atomic Research Tasks:")
-        print(json.dumps([t.to_dict() for t in tasks], indent=2))
+        print(f"\nGenerated {len(tasks)} Atomic Research Tasks.")
 
-        print("\nBreakdown by Research Connector:")
-        for connector in ["web", "github", "rag"]:
-            connector_tasks = [t for t in tasks if t.source_type == connector]
-            print(f"  [{connector.upper()}] ({len(connector_tasks)} tasks):")
-            for t in connector_tasks:
-                print(f"    * [{t.priority.upper()}] (Target: {t.target}) {t.question}")
-                print(f"      Purpose: {t.purpose}")
+        web_tasks = [t for t in tasks if t.source_type == "web"]
+        github_tasks = [t for t in tasks if t.source_type == "github"]
+        rag_tasks = [t for t in tasks if t.source_type == "rag"]
+
+        print(f"Task Breakdown: {len(web_tasks)} Web, {len(github_tasks)} GitHub, {len(rag_tasks)} RAG.")
+
+        # Stage 4: Web Research (execute only web tasks)
+        print("\n--- [Stage 4] Executing Web Research (web tasks only) ---")
+        # For concise demo execution, execute top high-priority web tasks
+        high_priority_web_tasks = [t for t in web_tasks if t.priority == "high"]
+        selected_web_tasks = high_priority_web_tasks[:2] if high_priority_web_tasks else web_tasks[:2]
+
+        print(f"Executing live search for {len(selected_web_tasks)} high-priority web task(s):\n")
+
+        for task_idx, web_task in enumerate(selected_web_tasks, start=1):
+            print(f"  [Web Task {task_idx}/{len(selected_web_tasks)}]")
+            print(f"  Question: {web_task.question}")
+            print(f"  Target:   {web_task.target}")
+            print(f"  Priority: {web_task.priority.upper()}")
+            print(f"  Query:    '{web_researcher.build_query(web_task)}'")
+
+            try:
+                results = web_researcher.search(web_task)
+                print(f"  Retrieved {len(results)} Web Sources:")
+                for r_idx, res in enumerate(results, start=1):
+                    print(f"    {r_idx}. [{res.source}] {res.title}")
+                    print(f"       URL: {res.url}")
+                    if res.snippet:
+                        snippet_preview = res.snippet.replace("\n", " ")
+                        if len(snippet_preview) > 140:
+                            snippet_preview = snippet_preview[:140] + "..."
+                        print(f"       Snippet: {snippet_preview}")
+                print()
+            except WebResearchError as e:
+                print(f"  [Web Research Error]: {e}\n")
+
+        print("  [Notice] GitHub and RAG research connectors are deferred to upcoming milestones.")
 
     print("\n" + "=" * 70)
     print("Full Pipeline Demo completed successfully.")
