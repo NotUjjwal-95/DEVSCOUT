@@ -5,6 +5,7 @@ Integrated Demo: Requirement Analysis -> Research Planning -> Task Generation ->
 
 import sys
 import json
+from typing import Any
 
 # Ensure UTF-8 output encoding on Windows consoles
 if sys.stdout.encoding and sys.stdout.encoding.lower() != "utf-8":
@@ -277,6 +278,7 @@ def run_pipeline_demo():
             print()
         except EvidenceContextError as err:
             print(f"  [EvidenceContext Error]: {err}\n")
+            continue
 
         # Stage 9: Synthesize DecisionReport via Reasoning Engine
         print("\n--- [Stage 9] Synthesizing DecisionReport via Reasoning Engine ---")
