@@ -4,7 +4,7 @@ Data models and schemas for DEVSCOUT.
 
 from typing import Any, Literal
 from urllib.parse import urlparse
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 
 class RequirementAnalysis(BaseModel):
@@ -214,6 +214,119 @@ class WebResearchResult(BaseModel):
     def to_dict(self) -> dict[str, Any]:
         """Convert the result into a standard Python dictionary."""
         return self.model_dump()
+
+
+class GitHubResearchResult(BaseModel):
+    """
+    Normalized result from a GitHub repository investigation for a specific research task.
+    """
+    repo_name: str = Field(
+        ...,
+        description="Full repository name or identifier, e.g. 'owner/repo'.",
+        min_length=1,
+    )
+    url: str = Field(
+        ...,
+        description="Direct HTTP/HTTPS URL to the repository.",
+        min_length=1,
+    )
+    description: str = Field(
+        default="",
+        description="Repository description or summary.",
+    )
+    owner: str = Field(
+        ...,
+        description="GitHub organization or user login.",
+        min_length=1,
+    )
+    stars: int = Field(
+        default=0,
+        description="Star count (stargazers_count).",
+        ge=0,
+    )
+    forks: int = Field(
+        default=0,
+        description="Forks count.",
+        ge=0,
+    )
+    language: str = Field(
+        default="",
+        description="Primary programming language.",
+    )
+    open_issues: int = Field(
+        default=0,
+        description="Open issues count.",
+        ge=0,
+    )
+    last_updated: str = Field(
+        default="",
+        description="Last updated timestamp.",
+    )
+    task_question: str = Field(
+        ...,
+        description="The research task question this repository addresses.",
+        min_length=1,
+    )
+    query: str = Field(
+        ...,
+        description="The query string executed to find this repository.",
+        min_length=1,
+    )
+
+    @model_validator(mode="before")
+    @classmethod
+    def normalize_aliases(cls, data: Any) -> Any:
+        if isinstance(data, dict):
+            if "repo_name" not in data and "name" in data:
+                data["repo_name"] = data["name"]
+            elif "repo_name" not in data and "full_name" in data:
+                data["repo_name"] = data["full_name"]
+            if "last_updated" not in data and "updated_at" in data:
+                data["last_updated"] = data["updated_at"]
+        return data
+
+    @field_validator("repo_name", "url", "owner", "task_question", "query")
+    @classmethod
+    def validate_non_empty(cls, v: str) -> str:
+        if not isinstance(v, str) or not v.strip():
+            raise ValueError("Field cannot be empty or whitespace only.")
+        return v.strip()
+
+    @field_validator("url")
+    @classmethod
+    def validate_http_url(cls, v: str) -> str:
+        parsed = urlparse(v)
+        if parsed.scheme.lower() not in ("http", "https") or not parsed.netloc:
+            raise ValueError(f"URL must have a valid http or https scheme and host: '{v}'")
+        return v
+
+    @field_validator("description", "language", "last_updated", mode="before")
+    @classmethod
+    def normalize_optional_strings(cls, v: Any) -> str:
+        if v is None:
+            return ""
+        return str(v).strip()
+
+    @field_validator("stars", "forks", "open_issues", mode="before")
+    @classmethod
+    def normalize_int_counts(cls, v: Any) -> int:
+        if v is None:
+            return 0
+        try:
+            val = int(v)
+            return max(0, val)
+        except (ValueError, TypeError):
+            return 0
+
+    @property
+    def name(self) -> str:
+        """Convenience property for repository name."""
+        return self.repo_name
+
+    def to_dict(self) -> dict[str, Any]:
+        """Convert the result into a standard Python dictionary."""
+        return self.model_dump()
+
 
 
 

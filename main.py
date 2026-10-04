@@ -14,11 +14,12 @@ from analyzer import RequirementAnalyzer, AnalyzerError
 from planner import ResearchPlanner, PlannerError
 from task_generator import TaskGenerator
 from web_researcher import WebResearcher, WebResearchError
+from github_researcher import GitHubResearcher, GitHubResearchError
 
 
 def run_pipeline_demo():
     print("=" * 70)
-    print("DEVSCOUT: Requirements -> Plan -> Tasks -> Web Research Pipeline")
+    print("DEVSCOUT: Requirements -> Plan -> Tasks -> Web & GitHub Research Pipeline")
     print("=" * 70)
 
     # Sample Request 1: Collaborative Whiteboard
@@ -47,7 +48,8 @@ def run_pipeline_demo():
         planner = ResearchPlanner()
         task_generator = TaskGenerator()
         web_researcher = WebResearcher(max_results_per_task=3)
-    except (AnalyzerError, PlannerError, WebResearchError) as e:
+        github_researcher = GitHubResearcher(max_results_per_task=3)
+    except (AnalyzerError, PlannerError, WebResearchError, GitHubResearchError) as e:
         print(f"[Error initializing components]: {e}")
         return
 
@@ -121,7 +123,39 @@ def run_pipeline_demo():
             except WebResearchError as e:
                 print(f"  [Web Research Error]: {e}\n")
 
-        print("  [Notice] GitHub and RAG research connectors are deferred to upcoming milestones.")
+        # Stage 5: GitHub Research (execute only github tasks)
+        print("\n--- [Stage 5] Executing GitHub Research (github tasks only) ---")
+        high_priority_github_tasks = [t for t in github_tasks if t.priority == "high"]
+        selected_github_tasks = high_priority_github_tasks[:2] if high_priority_github_tasks else github_tasks[:2]
+
+        if not selected_github_tasks:
+            print("  No GitHub tasks generated for this request.\n")
+        else:
+            print(f"Executing repository search for {len(selected_github_tasks)} GitHub task(s):\n")
+            for task_idx, gh_task in enumerate(selected_github_tasks, start=1):
+                print(f"  [GitHub Task {task_idx}/{len(selected_github_tasks)}]")
+                print(f"  Question: {gh_task.question}")
+                print(f"  Target:   {gh_task.target}")
+                print(f"  Priority: {gh_task.priority.upper()}")
+                print(f"  Query:    '{github_researcher.build_query(gh_task)}'")
+
+                try:
+                    gh_results = github_researcher.search(gh_task)
+                    print(f"  Retrieved {len(gh_results)} Repositories:")
+                    for r_idx, res in enumerate(gh_results, start=1):
+                        lang_str = f" | {res.language}" if res.language else ""
+                        print(f"    {r_idx}. [{res.owner}] {res.repo_name} (★ {res.stars:,} | Forks: {res.forks:,}{lang_str})")
+                        print(f"       URL: {res.url}")
+                        if res.description:
+                            desc_preview = res.description.replace("\n", " ")
+                            if len(desc_preview) > 140:
+                                desc_preview = desc_preview[:140] + "..."
+                            print(f"       Desc: {desc_preview}")
+                    print()
+                except GitHubResearchError as e:
+                    print(f"  [GitHub Research Error]: {e}\n")
+
+        print("  [Notice] RAG research connector is deferred to upcoming milestones.")
 
     print("\n" + "=" * 70)
     print("Full Pipeline Demo completed successfully.")
