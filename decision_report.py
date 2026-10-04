@@ -20,6 +20,13 @@ from models import (
     Uncertainty,
     validate_decision_report_evidence,
 )
+from reasoning_engine import (
+    APIConnectionError,
+    ReasoningEngine,
+    ReasoningEngineError,
+    ReasoningValidationError,
+    synthesize_decision_report,
+)
 
 __all__ = [
     "Confidence",
@@ -36,4 +43,9 @@ __all__ = [
     "DecisionReportError",
     "DecisionReportValidationError",
     "validate_decision_report_evidence",
+    "ReasoningEngine",
+    "ReasoningEngineError",
+    "ReasoningValidationError",
+    "APIConnectionError",
+    "synthesize_decision_report",
 ]

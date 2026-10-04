@@ -18,6 +18,7 @@ from github_researcher import GitHubResearcher, GitHubResearchError
 from rag_researcher import RAGResearcher, RAGResearchError
 from evidence_layer import EvidenceLayer, EvidenceError
 from evidence_context import build_evidence_context, EvidenceContextError
+from reasoning_engine import ReasoningEngine, ReasoningEngineError
 
 
 def run_pipeline_demo():
@@ -54,7 +55,8 @@ def run_pipeline_demo():
         github_researcher = GitHubResearcher(max_results_per_task=3)
         rag_researcher = RAGResearcher(max_results_per_task=3)
         evidence_layer = EvidenceLayer(deduplicate=True, rank=True)
-    except (AnalyzerError, PlannerError, WebResearchError, GitHubResearchError, RAGResearchError, EvidenceError) as e:
+        reasoning_engine = ReasoningEngine()
+    except (AnalyzerError, PlannerError, WebResearchError, GitHubResearchError, RAGResearchError, EvidenceError, ReasoningEngineError) as e:
         print(f"[Error initializing components]: {e}")
         return
 
@@ -276,7 +278,77 @@ def run_pipeline_demo():
         except EvidenceContextError as err:
             print(f"  [EvidenceContext Error]: {err}\n")
 
-        print("  [Notice] Evidence Context completed. Decision & Reasoning Engine are deferred to upcoming milestones.")
+        # Stage 9: Synthesize DecisionReport via Reasoning Engine
+        print("\n--- [Stage 9] Synthesizing DecisionReport via Reasoning Engine ---")
+        try:
+            decision_report = reasoning_engine.reason(evidence_context)
+            print("\n[DecisionReport Synthesized & Evidence-Validated Successfully]:")
+            print(f"  Overall Confidence: {decision_report.overall_confidence.upper()}")
+            print(f"  Executive Summary:  {decision_report.summary}\n")
+
+            if decision_report.recommendation:
+                rec = decision_report.recommendation
+                refs_str = f" [Cited: {', '.join(rec.evidence_references)}]" if rec.evidence_references else ""
+                print(f"  Primary Recommendation: {rec.option} (Confidence: {rec.confidence.upper()}){refs_str}")
+                print(f"  Rationale:              {rec.reason}\n")
+            else:
+                print("  Primary Recommendation: None (Insufficient evidence for a definitive recommendation)\n")
+
+            if decision_report.findings:
+                print("  Substantive Findings:")
+                for f_idx, f in enumerate(decision_report.findings, start=1):
+                    refs_str = f" [Cited: {', '.join(f.evidence_references)}]" if f.evidence_references else ""
+                    print(f"    {f_idx}. {f.finding} ({f.confidence.upper()}){refs_str}")
+                    print(f"       Question:  \"{f.question}\"")
+                    print(f"       Reasoning: {f.reasoning}")
+                print()
+
+            if decision_report.comparisons:
+                print("  Criterion Comparisons:")
+                for c in decision_report.comparisons:
+                    print(f"    * Criterion: {c.criterion}")
+                    for a in c.assessments:
+                        refs_str = f" [Cited: {', '.join(a.evidence_references)}]" if a.evidence_references else ""
+                        print(f"      - {a.option}: {a.assessment}{refs_str}")
+                print()
+
+            if decision_report.tradeoffs:
+                print("  Key Tradeoffs:")
+                for t in decision_report.tradeoffs:
+                    refs_str = f" [Cited: {', '.join(t.evidence_references)}]" if t.evidence_references else ""
+                    print(f"    * Choice: {t.decision}{refs_str}")
+                    print(f"      Gain: {t.gain}")
+                    print(f"      Cost: {t.cost}")
+                print()
+
+            if decision_report.risks:
+                print("  Identified Risks:")
+                for r in decision_report.risks:
+                    refs_str = f" [Cited: {', '.join(r.evidence_references)}]" if r.evidence_references else ""
+                    print(f"    * {r.risk}{refs_str} -> Impact: {r.impact}")
+                print()
+
+            if decision_report.conflicts:
+                print("  Evidence Conflicts:")
+                for c in decision_report.conflicts:
+                    refs_str = f" [Cited: {', '.join(c.evidence_references)}]"
+                    print(f"    * Topic: {c.topic}{refs_str}")
+                    print(f"      Assessment: {c.assessment}")
+                print()
+
+            if decision_report.uncertainties:
+                print("  Unresolved Uncertainties:")
+                for u in decision_report.uncertainties:
+                    print(f"    * Topic:  {u.topic}")
+                    print(f"      Reason: {u.reason}")
+                    print(f"      Impact: {u.impact}")
+                print()
+
+            all_cited = decision_report.all_evidence_references
+            print(f"  Total Validated Evidence Citations: {len(all_cited)} ({', '.join(all_cited) if all_cited else 'None'})\n")
+
+        except ReasoningEngineError as err:
+            print(f"  [Reasoning Engine Error]: {err}\n")
 
     print("\n" + "=" * 70)
     print("Full Pipeline Demo completed successfully.")
