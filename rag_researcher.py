@@ -47,8 +47,11 @@ class PineconeProvider:
         api_key: str | None = None,
         index_name: str | None = None,
         index_host: str | None = None,
+        embedding_model: str | None = None,
+        namespace: str | None = None,
         timeout: float = 10.0,
         client: httpx.Client | None = None,
+        embed_fn: Any = None,
     ):
         if api_key is not None:
             self.api_key = api_key.strip()
@@ -68,8 +71,20 @@ class PineconeProvider:
                 or os.environ.get("PINECONE_HOST")
                 or ""
             ).strip()
+
+        self.embedding_model = (
+            embedding_model
+            or os.environ.get("PINECONE_EMBEDDING_MODEL")
+            or "multilingual-e5-large"
+        ).strip()
+        self.namespace = (
+            namespace
+            or os.environ.get("PINECONE_NAMESPACE")
+            or ""
+        ).strip()
         self.timeout = timeout
         self._client = client
+        self._embed_fn = embed_fn
 
     def _get_headers(self) -> dict[str, str]:
         if not self.api_key:
@@ -136,25 +151,97 @@ class PineconeProvider:
         except Exception as e:
             raise RAGConnectionError(f"Failed to resolve Pinecone index host: {e}") from e
 
+    def embed_query(self, text: str) -> list[float]:
+        """
+        Generate a query embedding vector for the input text using Pinecone Inference API.
+        """
+        if self._embed_fn:
+            return self._embed_fn(text)
+
+        if not self.api_key:
+            raise RAGConnectionError(
+                "PINECONE_API_KEY is not configured. Please set PINECONE_API_KEY in your environment."
+            )
+
+        url = "https://api.pinecone.io/embed"
+        headers = self._get_headers()
+        payload = {
+            "model": self.embedding_model,
+            "parameters": {
+                "input_type": "query",
+                "truncate": "END",
+            },
+            "inputs": [{"text": text}],
+        }
+
+        try:
+            if self._client:
+                response = self._client.post(url, json=payload, headers=headers, timeout=self.timeout)
+            else:
+                with httpx.Client(timeout=self.timeout) as client:
+                    response = client.post(url, json=payload, headers=headers)
+
+            if response.status_code in (401, 403):
+                raise RAGConnectionError(
+                    f"Pinecone embedding authentication failed (HTTP {response.status_code}): {response.text}"
+                )
+            response.raise_for_status()
+            data = response.json()
+        except RAGConnectionError:
+            raise
+        except httpx.HTTPStatusError as e:
+            raise RAGConnectionError(
+                f"Pinecone embedding API HTTP error ({e.response.status_code}): {e}"
+            ) from e
+        except httpx.RequestError as e:
+            raise RAGConnectionError(f"Pinecone embedding API connection failed: {e}") from e
+        except Exception as e:
+            raise RAGConnectionError(f"Failed to generate query embedding for '{text}': {e}") from e
+
+        embed_data = data.get("data", [])
+        if not embed_data or not isinstance(embed_data, list) or "values" not in embed_data[0]:
+            raise RAGConnectionError(f"Pinecone embedding API returned malformed response: {data}")
+
+        vector = embed_data[0]["values"]
+        if not isinstance(vector, list) or not vector:
+            raise RAGConnectionError("Pinecone embedding API returned empty vector representation.")
+
+        return [float(x) for x in vector]
+
     def search(self, query: str, max_results: int = 5) -> list[dict[str, Any]]:
         """
-        Query the Pinecone index for relevant documents/vectors.
+        Perform semantic search against the Pinecone index:
+        1. Embed the query string into a dense vector representation.
+        2. Query the Pinecone index data plane using the vector embedding.
+        3. Extract and normalize matched document records.
         """
         if not self.api_key:
             raise RAGConnectionError(
                 "PINECONE_API_KEY is not configured. Please set PINECONE_API_KEY in your environment."
             )
 
+        query_clean = query.strip()
+        if not query_clean:
+            return []
+
+        # 1. Generate query embedding representation via Pinecone Inference
+        query_vector = self.embed_query(query_clean)
+
+        # 2. Resolve index host data plane
         host = self._resolve_host()
         endpoint = f"{host}/query"
         headers = self._get_headers()
 
-        payload = {
+        payload: dict[str, Any] = {
+            "vector": query_vector,
             "topK": max(1, max_results),
             "includeMetadata": True,
             "includeValues": False,
         }
+        if self.namespace:
+            payload["namespace"] = self.namespace
 
+        # 3. Query index endpoint
         try:
             if self._client:
                 response = self._client.post(

@@ -339,15 +339,83 @@ class TestPineconeProvider(unittest.TestCase):
         mock_client = MagicMock()
         mock_client.get.return_value = mock_response
 
-        provider = PineconeProvider(api_key="test-key", client=mock_client)
+        provider = PineconeProvider(
+            api_key="test-key",
+            client=mock_client,
+            embed_fn=lambda text: [0.1, 0.2, 0.3],
+        )
         with self.assertRaises(RAGConnectionError) as ctx:
             provider.search("test query")
         self.assertIn("No Pinecone indexes found", str(ctx.exception))
 
-    def test_search_with_direct_host_queries_data_plane(self):
+    def test_embed_query_calls_pinecone_inference_api(self):
         mock_response = MagicMock()
         mock_response.status_code = 200
         mock_response.json.return_value = {
+            "model": "multilingual-e5-large",
+            "data": [
+                {
+                    "values": [0.12, -0.34, 0.56],
+                    "vector_type": "dense",
+                }
+            ],
+            "usage": {"total_tokens": 4},
+        }
+        mock_client = MagicMock()
+        mock_client.post.return_value = mock_response
+
+        provider = PineconeProvider(
+            api_key="test-key",
+            embedding_model="multilingual-e5-large",
+            client=mock_client,
+        )
+        vector = provider.embed_query("Kafka telemetry benchmark")
+
+        self.assertEqual(vector, [0.12, -0.34, 0.56])
+        mock_client.post.assert_called_once()
+        call_args = mock_client.post.call_args
+        called_url = call_args[0][0] if call_args[0] else call_args[1].get("url")
+        self.assertEqual(called_url, "https://api.pinecone.io/embed")
+        payload = call_args[1].get("json") or call_args[0][1]
+        self.assertEqual(payload["model"], "multilingual-e5-large")
+        self.assertEqual(payload["inputs"], [{"text": "Kafka telemetry benchmark"}])
+        self.assertEqual(payload["parameters"]["input_type"], "query")
+
+    def test_embed_query_authentication_failure(self):
+        mock_response = MagicMock()
+        mock_response.status_code = 401
+        mock_response.text = "Unauthorized: Invalid API Key"
+        mock_client = MagicMock()
+        mock_client.post.return_value = mock_response
+
+        provider = PineconeProvider(api_key="bad-key", client=mock_client)
+        with self.assertRaises(RAGConnectionError) as ctx:
+            provider.embed_query("test query")
+        self.assertIn("Pinecone embedding authentication failed (HTTP 401)", str(ctx.exception))
+
+    def test_embed_query_malformed_response_raises_connection_error(self):
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = {"data": []}
+        mock_client = MagicMock()
+        mock_client.post.return_value = mock_response
+
+        provider = PineconeProvider(api_key="test-key", client=mock_client)
+        with self.assertRaises(RAGConnectionError) as ctx:
+            provider.embed_query("test query")
+        self.assertIn("malformed response", str(ctx.exception))
+
+    def test_search_sends_query_vector_in_pinecone_query_payload(self):
+        embed_response = MagicMock()
+        embed_response.status_code = 200
+        embed_response.json.return_value = {
+            "model": "multilingual-e5-large",
+            "data": [{"values": [0.05, 0.15, -0.25]}],
+        }
+
+        query_response = MagicMock()
+        query_response.status_code = 200
+        query_response.json.return_value = {
             "matches": [
                 {
                     "id": "vec-101",
@@ -360,8 +428,14 @@ class TestPineconeProvider(unittest.TestCase):
                 }
             ]
         }
+
+        def mock_post(url, **kwargs):
+            if "api.pinecone.io/embed" in url:
+                return embed_response
+            return query_response
+
         mock_client = MagicMock()
-        mock_client.post.return_value = mock_response
+        mock_client.post.side_effect = mock_post
 
         provider = PineconeProvider(
             api_key="test-key",
@@ -378,6 +452,63 @@ class TestPineconeProvider(unittest.TestCase):
         self.assertEqual(item["doc_id"], "vec-101")
         self.assertEqual(item["score"], 0.91)
 
+        # Specifically assert that POST /query was called with the vector representation!
+        query_call = [c for c in mock_client.post.call_args_list if "query" in (c[0][0] if c[0] else "")][0]
+        query_payload = query_call[1].get("json") or query_call[0][1]
+        self.assertIn("vector", query_payload)
+        self.assertEqual(query_payload["vector"], [0.05, 0.15, -0.25])
+        self.assertEqual(query_payload["topK"], 3)
+        self.assertTrue(query_payload["includeMetadata"])
+        self.assertFalse(query_payload["includeValues"])
+
+    def test_search_with_namespace(self):
+        query_response = MagicMock()
+        query_response.status_code = 200
+        query_response.json.return_value = {"matches": []}
+
+        mock_client = MagicMock()
+        mock_client.post.return_value = query_response
+
+        provider = PineconeProvider(
+            api_key="test-key",
+            index_host="https://my-index-xyz.svc.pinecone.io",
+            namespace="dev-knowledge-base",
+            client=mock_client,
+            embed_fn=lambda q: [0.1, 0.2, 0.3],
+        )
+        provider.search("test query", max_results=5)
+
+        call_args = mock_client.post.call_args
+        query_payload = call_args[1].get("json")
+        self.assertEqual(query_payload["namespace"], "dev-knowledge-base")
+        self.assertEqual(query_payload["vector"], [0.1, 0.2, 0.3])
+
+    def test_search_uses_injected_embed_fn(self):
+        query_response = MagicMock()
+        query_response.status_code = 200
+        query_response.json.return_value = {"matches": []}
+
+        mock_client = MagicMock()
+        mock_client.post.return_value = query_response
+
+        custom_embed_fn = MagicMock(return_value=[0.77, 0.88, 0.99])
+
+        provider = PineconeProvider(
+            api_key="test-key",
+            index_host="https://my-index-xyz.svc.pinecone.io",
+            client=mock_client,
+            embed_fn=custom_embed_fn,
+        )
+        results = provider.search("custom embed query", max_results=2)
+
+        custom_embed_fn.assert_called_once_with("custom embed query")
+        # client.post should only be called once for /query (not for /embed)
+        self.assertEqual(mock_client.post.call_count, 1)
+        called_url = mock_client.post.call_args[0][0]
+        self.assertEqual(called_url, "https://my-index-xyz.svc.pinecone.io/query")
+        payload = mock_client.post.call_args[1].get("json")
+        self.assertEqual(payload["vector"], [0.77, 0.88, 0.99])
+
     def test_network_failure_raises_connection_error(self):
         mock_client = MagicMock()
         mock_client.post.side_effect = httpx.ConnectError("Connection refused")
@@ -386,6 +517,7 @@ class TestPineconeProvider(unittest.TestCase):
             api_key="test-key",
             index_host="https://my-index-xyz.svc.pinecone.io",
             client=mock_client,
+            embed_fn=lambda q: [0.1, 0.2],
         )
         with self.assertRaises(RAGConnectionError):
             provider.search("test query")
