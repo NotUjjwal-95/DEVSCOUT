@@ -237,6 +237,13 @@ export interface CreateResearchDTO {
   };
 }
 
+export interface ResearchStartResponse {
+  id?: string;
+  researchId?: string;
+  research_id?: string;
+  session?: ResearchSession;
+}
+
 export interface ResearchStatusResponse {
   id: string;
   state: SessionState;

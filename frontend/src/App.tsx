@@ -21,16 +21,21 @@ export default function App() {
   const [sessions, setSessions] = useState<ResearchSession[]>([]);
   const [activeSessionId, setActiveSessionId] = useState<string>('');
   const [isStarting, setIsStarting] = useState(false);
+  const [error, setError] = useState<string | null>(null);
   const [isHelpOpen, setIsHelpOpen] = useState(false);
   const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false);
 
   // Load research sessions from service layer on mount
   useEffect(() => {
     const init = async () => {
-      const all = await researchService.getAllSessions();
-      setSessions(all);
-      if (all.length > 0) {
-        setActiveSessionId(all[0].id);
+      try {
+        const all = await researchService.getAllSessions();
+        setSessions(all);
+        if (all.length > 0) {
+          setActiveSessionId(all[0].id);
+        }
+      } catch (cause) {
+        setError(cause instanceof Error ? cause.message : 'Unable to load research history.');
       }
     };
     init();
@@ -41,6 +46,7 @@ export default function App() {
   // Handlers using typed service layer
   const handleStartResearch = async (dto: CreateResearchDTO) => {
     setIsStarting(true);
+    setError(null);
     try {
       const newSession = await researchService.createResearch(dto, (updated) => {
         setSessions(prev => {
@@ -52,11 +58,13 @@ export default function App() {
           }
           return [updated, ...prev];
         });
-      });
+      }, (cause) => setError(cause.message));
 
       setSessions(prev => [newSession, ...prev.filter(s => s.id !== newSession.id)]);
       setActiveSessionId(newSession.id);
       setCurrentView('workspace');
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : 'Unable to start research.');
     } finally {
       setIsStarting(false);
     }
@@ -64,15 +72,22 @@ export default function App() {
 
   const handleFastForward = async () => {
     if (!activeSession) return;
-    const completed = await researchService.fastForwardResearch(activeSession.id);
-    if (completed) {
-      setSessions(prev => prev.map(s => (s.id === completed.id ? completed : s)));
+    try {
+      const completed = await researchService.fastForwardResearch(activeSession.id);
+      if (completed) {
+        setSessions(prev => prev.map(s => (s.id === completed.id ? completed : s)));
+      }
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : 'Unable to update research session.');
     }
   };
 
   const handleCancelResearch = () => {
     if (!activeSession) return;
-    researchService.cancelResearch(activeSession.id);
+    if (!researchService.cancelResearch(activeSession.id)) {
+      setError('The FastAPI contract does not expose research cancellation.');
+      return;
+    }
     setSessions(prev =>
       prev.map(s => {
         if (s.id === activeSession.id) {
@@ -84,11 +99,15 @@ export default function App() {
   };
 
   const handleDeleteSession = async (id: string) => {
-    await researchService.deleteResearchSession(id);
-    const updated = await researchService.getAllSessions();
-    setSessions(updated);
-    if (activeSessionId === id && updated.length > 0) {
-      setActiveSessionId(updated[0].id);
+    try {
+      await researchService.deleteResearchSession(id);
+      const updated = await researchService.getAllSessions();
+      setSessions(updated);
+      if (activeSessionId === id && updated.length > 0) {
+        setActiveSessionId(updated[0].id);
+      }
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : 'Unable to delete research session.');
     }
   };
 
@@ -102,13 +121,17 @@ export default function App() {
   };
 
   const handleResetSeed = async () => {
-    researchService.resetAllToSeed();
-    const all = await researchService.getAllSessions();
-    setSessions(all);
-    if (all.length > 0) {
-      setActiveSessionId(all[0].id);
+    try {
+      researchService.resetAllToSeed();
+      const all = await researchService.getAllSessions();
+      setSessions(all);
+      if (all.length > 0) {
+        setActiveSessionId(all[0].id);
+      }
+      setCurrentView('workspace');
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : 'Unable to reset local research data.');
     }
-    setCurrentView('workspace');
   };
 
   return (
@@ -139,6 +162,14 @@ export default function App() {
 
         {/* Viewport Canvas (1440px baseline presence) */}
         <main className="flex-1 p-4 sm:p-6 lg:p-8 max-w-[1440px] w-full mx-auto">
+          {error && (
+            <div className="mb-4 flex items-center justify-between gap-4 rounded-md border border-red-900/70 bg-red-950/40 px-4 py-3 text-sm text-red-200">
+              <span>{error}</span>
+              <button type="button" onClick={() => setError(null)} className="text-red-300 hover:text-white">
+                Dismiss
+              </button>
+            </div>
+          )}
           {currentView === 'new' && (
             <NewResearchPage
               onStart={handleStartResearch}

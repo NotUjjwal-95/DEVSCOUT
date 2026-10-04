@@ -9,14 +9,13 @@ import {
   EvidenceFilter,
   ResearchSessionSummary,
   ResearchStageInfo,
-  SessionState,
   ResearchStageId,
-  RequirementAnalysis
+  RequirementAnalysis,
+  ResearchStartResponse
 } from '../types';
 import {
   MOCK_RESEARCH_SESSIONS,
   INITIAL_RESEARCH_STAGES,
-  CANONICAL_WHITEBOARD_SESSION,
   WHITEBOARD_QUESTIONS,
   WHITEBOARD_EVIDENCE,
   WHITEBOARD_REPOSITORIES,
@@ -25,6 +24,8 @@ import {
 
 const STORAGE_KEY = 'devscout_research_sessions_v2';
 const SETTINGS_KEY = 'devscout_settings_v2';
+const DEFAULT_API_BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000/api/v1';
+const DEFAULT_USE_LIVE_BACKEND = import.meta.env.VITE_USE_LIVE_BACKEND === 'true';
 
 export interface DevscoutSettings {
   apiBaseUrl: string;
@@ -35,9 +36,19 @@ export interface DevscoutSettings {
   enableInternalRag: boolean;
 }
 
+export class ResearchApiError extends Error {
+  public readonly status?: number;
+
+  constructor(message: string, status?: number) {
+    super(message);
+    this.name = 'ResearchApiError';
+    this.status = status;
+  }
+}
+
 const DEFAULT_SETTINGS: DevscoutSettings = {
-  apiBaseUrl: 'http://localhost:8000/api/v1',
-  useLiveBackend: false,
+  apiBaseUrl: DEFAULT_API_BASE_URL,
+  useLiveBackend: DEFAULT_USE_LIVE_BACKEND,
   researchDepth: 'deep',
   enableWebSearch: true,
   enableGithubAudit: true,
@@ -47,6 +58,7 @@ const DEFAULT_SETTINGS: DevscoutSettings = {
 class ResearchService {
   private sessions: ResearchSession[] = [];
   private activeTimers: Map<string, NodeJS.Timeout[]> = new Map();
+  private activePolls: Map<string, number> = new Map();
 
   constructor() {
     this.loadFromStorage();
@@ -98,8 +110,13 @@ class ResearchService {
    */
   public async createResearch(
     input: CreateResearchDTO,
-    onProgress?: (session: ResearchSession) => void
+    onProgress?: (session: ResearchSession) => void,
+    onError?: (error: Error) => void
   ): Promise<ResearchSession> {
+    if (this.getSettings().useLiveBackend) {
+      return this.createLiveResearch(input, onProgress, onError);
+    }
+
     const id = `res-${Date.now()}`;
     const now = new Date().toISOString();
 
@@ -171,6 +188,10 @@ class ResearchService {
    * Maps to GET /api/v1/research/{id}
    */
   public async getResearchSession(id: string): Promise<ResearchSession | null> {
+    if (this.getSettings().useLiveBackend) {
+      return this.request<ResearchSession>(`/research/${encodeURIComponent(id)}`);
+    }
+
     const session = this.sessions.find(s => s.id === id);
     return session ? JSON.parse(JSON.stringify(session)) : null;
   }
@@ -181,6 +202,10 @@ class ResearchService {
    * Maps to GET /api/v1/research/{id}/status
    */
   public async getResearchStatus(id: string): Promise<ResearchStatusResponse | null> {
+    if (this.getSettings().useLiveBackend) {
+      return this.request<ResearchStatusResponse>(`/research/${encodeURIComponent(id)}/status`);
+    }
+
     const session = await this.getResearchSession(id);
     if (!session) return null;
 
@@ -205,6 +230,13 @@ class ResearchService {
    * Maps to GET /api/v1/research/{id}/tasks
    */
   public async getResearchTasks(id: string): Promise<ResearchTask[]> {
+    if (this.getSettings().useLiveBackend) {
+      const response = await this.request<ResearchTask[] | { tasks: ResearchTask[] }>(
+        `/research/${encodeURIComponent(id)}/tasks`
+      );
+      return Array.isArray(response) ? response : response.tasks;
+    }
+
     const session = await this.getResearchSession(id);
     if (!session || !session.plan) return [];
     return session.plan.questions.flatMap(q => q.tasks);
@@ -216,6 +248,13 @@ class ResearchService {
    * Maps to GET /api/v1/research/{id}/evidence
    */
   public async getEvidence(id: string, filter?: EvidenceFilter): Promise<Evidence[]> {
+    if (this.getSettings().useLiveBackend) {
+      const response = await this.request<Evidence[] | { evidence: Evidence[] }>(
+        `/research/${encodeURIComponent(id)}/evidence`
+      );
+      return this.filterEvidence(Array.isArray(response) ? response : response.evidence, filter);
+    }
+
     const session = await this.getResearchSession(id);
     if (!session) return [];
 
@@ -253,6 +292,13 @@ class ResearchService {
    * Maps to GET /api/v1/research/{id}/repositories
    */
   public async getRepositories(id: string): Promise<GitHubResearchResult[]> {
+    if (this.getSettings().useLiveBackend) {
+      const response = await this.request<GitHubResearchResult[] | { repositories: GitHubResearchResult[] }>(
+        `/research/${encodeURIComponent(id)}/repositories`
+      );
+      return Array.isArray(response) ? response : response.repositories;
+    }
+
     const session = await this.getResearchSession(id);
     return session?.repositories || [];
   }
@@ -263,6 +309,10 @@ class ResearchService {
    * Maps to GET /api/v1/research/{id}/report
    */
   public async getDecisionReport(id: string): Promise<DecisionReport | null> {
+    if (this.getSettings().useLiveBackend) {
+      return this.request<DecisionReport>(`/research/${encodeURIComponent(id)}/report`);
+    }
+
     const session = await this.getResearchSession(id);
     return session?.report || null;
   }
@@ -273,6 +323,13 @@ class ResearchService {
    * Maps to GET /api/v1/research/history
    */
   public async getResearchHistory(): Promise<ResearchSessionSummary[]> {
+    if (this.getSettings().useLiveBackend) {
+      const response = await this.request<ResearchSessionSummary[] | { history: ResearchSessionSummary[] }>(
+        '/research/history'
+      );
+      return Array.isArray(response) ? response : response.history;
+    }
+
     return this.sessions
       .map(s => ({
         id: s.id,
@@ -289,18 +346,37 @@ class ResearchService {
   }
 
   public async getAllSessions(): Promise<ResearchSession[]> {
+    if (this.getSettings().useLiveBackend) {
+      const history = await this.getResearchHistory();
+      const sessions = await Promise.all(history.map(item => this.getResearchSession(item.id)));
+      return sessions.filter((session): session is ResearchSession => session !== null);
+    }
+
     return [...this.sessions].sort(
       (a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()
     );
   }
 
   public async deleteResearchSession(id: string): Promise<void> {
+    if (this.getSettings().useLiveBackend) {
+      throw new ResearchApiError('Deleting research sessions is not supported by the FastAPI contract.');
+    }
+
     this.cancelResearch(id);
     this.sessions = this.sessions.filter(s => s.id !== id);
     this.saveToStorage();
   }
 
-  public cancelResearch(id: string): void {
+  public cancelResearch(id: string): boolean {
+    const poll = this.activePolls.get(id);
+    if (poll !== undefined) {
+      window.clearInterval(poll);
+      this.activePolls.delete(id);
+    }
+    if (this.getSettings().useLiveBackend) {
+      return false;
+    }
+
     const timers = this.activeTimers.get(id);
     if (timers) {
       timers.forEach(clearTimeout);
@@ -318,9 +394,14 @@ class ResearchService {
       });
       this.saveToStorage();
     }
+    return true;
   }
 
   public async fastForwardResearch(id: string): Promise<ResearchSession | null> {
+    if (this.getSettings().useLiveBackend) {
+      return this.getResearchSession(id);
+    }
+
     const timers = this.activeTimers.get(id);
     if (timers) {
       timers.forEach(clearTimeout);
@@ -378,6 +459,9 @@ class ResearchService {
   }
 
   public resetAllToSeed(): void {
+    if (this.getSettings().useLiveBackend) {
+      return;
+    }
     this.sessions = JSON.parse(JSON.stringify(MOCK_RESEARCH_SESSIONS));
     this.saveToStorage();
   }
@@ -631,6 +715,127 @@ class ResearchService {
     );
 
     this.activeTimers.set(sessionId, timers);
+  }
+
+  private async createLiveResearch(
+    input: CreateResearchDTO,
+    onProgress?: (session: ResearchSession) => void,
+    onError?: (error: Error) => void
+  ): Promise<ResearchSession> {
+    const response = await this.request<ResearchStartResponse | ResearchSession>('/research/start', {
+      method: 'POST',
+      body: JSON.stringify(input)
+    });
+    const started = this.unwrapResponse(response);
+    const sessionId = this.getResponseId(started);
+    const initial = this.isResearchSession(started)
+      ? started
+      : await this.getResearchSession(sessionId);
+
+    if (!initial) {
+      throw new ResearchApiError(`Research "${sessionId}" was started but its session could not be loaded.`);
+    }
+    onProgress?.(initial);
+    this.startPolling(sessionId, onProgress, onError);
+    return initial;
+  }
+
+  private startPolling(
+    id: string,
+    onProgress?: (session: ResearchSession) => void,
+    onError?: (error: Error) => void
+  ): void {
+    const existing = this.activePolls.get(id);
+    if (existing !== undefined) window.clearInterval(existing);
+
+    const poll = window.setInterval(async () => {
+      try {
+        const session = await this.getResearchSession(id);
+        if (session) onProgress?.(session);
+        const status = await this.getResearchStatus(id);
+        if (status?.isComplete || status?.state === 'failed') {
+          window.clearInterval(poll);
+          this.activePolls.delete(id);
+        }
+      } catch (cause) {
+        window.clearInterval(poll);
+        this.activePolls.delete(id);
+        const error = cause instanceof Error ? cause : new ResearchApiError('Research polling failed.');
+        onError?.(error);
+      }
+    }, 2000);
+    this.activePolls.set(id, poll);
+  }
+
+  private async request<T>(path: string, init: RequestInit = {}): Promise<T> {
+    const { apiBaseUrl } = this.getSettings();
+    const baseUrl = apiBaseUrl.replace(/\/+$/, '');
+    let response: Response;
+    try {
+      response = await fetch(`${baseUrl}${path}`, {
+        ...init,
+        headers: { Accept: 'application/json', 'Content-Type': 'application/json', ...init.headers }
+      });
+    } catch {
+      throw new ResearchApiError(`Unable to reach the research backend at ${baseUrl}.`);
+    }
+
+    const text = await response.text();
+    let payload: unknown = undefined;
+    if (text) {
+      try {
+        payload = JSON.parse(text);
+      } catch {
+        payload = text;
+      }
+    }
+    if (!response.ok) {
+      const detail = typeof payload === 'object' && payload !== null && 'detail' in payload
+        ? String(payload.detail)
+        : `Request failed with status ${response.status}.`;
+      throw new ResearchApiError(detail, response.status);
+    }
+    return this.unwrapResponse(payload) as T;
+  }
+
+  private unwrapResponse<T>(payload: T): T {
+    if (typeof payload === 'object' && payload !== null && 'data' in payload) {
+      return (payload as T & { data: T }).data;
+    }
+    return payload;
+  }
+
+  private getResponseId(response: ResearchStartResponse | ResearchSession): string {
+    if ('id' in response && typeof response.id === 'string') return response.id;
+    if ('researchId' in response && typeof response.researchId === 'string') return response.researchId;
+    if ('research_id' in response && typeof response.research_id === 'string') return response.research_id;
+    throw new ResearchApiError('The research backend returned no session id.');
+  }
+
+  private isResearchSession(value: ResearchStartResponse | ResearchSession): value is ResearchSession {
+    return 'objective' in value && 'state' in value && 'stages' in value;
+  }
+
+  private filterEvidence(items: Evidence[], filter?: EvidenceFilter): Evidence[] {
+    let filtered = [...items];
+    if (filter?.sourceType && filter.sourceType !== 'all') {
+      filtered = filtered.filter(item => item.sourceType === filter.sourceType);
+    }
+    if (filter?.query?.trim()) {
+      const query = filter.query.toLowerCase().trim();
+      filtered = filtered.filter(item =>
+        [item.title, item.snippet, item.domain].some(value => value.toLowerCase().includes(query))
+      );
+    }
+    if (filter?.sortBy === 'relevance') {
+      const order = { primary: 4, benchmark: 3, high: 2, medium: 1 };
+      filtered.sort((a, b) => order[b.relevance] - order[a.relevance]);
+    } else if (filter?.sortBy === 'newest') {
+      filtered.sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
+    } else if (filter?.sortBy === 'domain') {
+      filtered.sort((a, b) => a.domain.localeCompare(b.domain));
+    }
+    return filtered;
   }
 }
 
