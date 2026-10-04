@@ -161,3 +161,50 @@ class ResearchTask(BaseModel):
         return self.model_dump()
 
 
+class WebResearchResult(BaseModel):
+    """
+    Normalized result from a web research investigation for a specific research task.
+    """
+    title: str = Field(
+        ...,
+        description="Title of the web resource or article.",
+        min_length=1,
+    )
+    url: str = Field(
+        ...,
+        description="Direct URL to the web resource.",
+        min_length=1,
+    )
+    source: str = Field(
+        ...,
+        description="Domain or publishing source name (e.g. 'github.com', 'dev.to', 'timescale.com').",
+        min_length=1,
+    )
+    snippet: str = Field(
+        default="",
+        description="Relevant content excerpt or summary from the web resource.",
+    )
+    task_question: str = Field(
+        ...,
+        description="The research task question this result addresses.",
+        min_length=1,
+    )
+    query: str = Field(
+        ...,
+        description="The query string executed to find this result.",
+        min_length=1,
+    )
+
+    @field_validator("title", "url", "source", "task_question", "query")
+    @classmethod
+    def validate_non_empty(cls, v: str) -> str:
+        if not isinstance(v, str) or not v.strip():
+            raise ValueError("Field cannot be empty or whitespace only.")
+        return v.strip()
+
+    def to_dict(self) -> dict[str, Any]:
+        """Convert the result into a standard Python dictionary."""
+        return self.model_dump()
+
+
+
