@@ -106,3 +106,58 @@ class ResearchPlan(BaseModel):
         """Filter research questions by source type."""
         return [q for q in self.research_questions if source in q.source_types]
 
+
+class ResearchTask(BaseModel):
+    """
+    An atomic, executable research task targeted at a specific connector (web, github, rag).
+    """
+    question: str = Field(
+        ...,
+        description="Specific question to be answered by the research connector.",
+        min_length=1,
+    )
+    source_type: SourceType = Field(
+        ...,
+        description="Target research connector: 'web', 'github', or 'rag'.",
+    )
+    priority: PriorityLevel = Field(
+        ...,
+        description="Importance ranking of the task: 'high', 'medium', or 'low'.",
+    )
+    target: str = Field(
+        ...,
+        description="Technology, library, architecture, or concept being investigated.",
+        min_length=1,
+    )
+    purpose: str = Field(
+        ...,
+        description="Why this investigation matters to the technical decision.",
+        min_length=1,
+    )
+
+    @field_validator("source_type", mode="before")
+    @classmethod
+    def normalize_source_type(cls, v: Any) -> Any:
+        if isinstance(v, str):
+            return v.strip().lower()
+        return v
+
+    @field_validator("priority", mode="before")
+    @classmethod
+    def normalize_priority(cls, v: Any) -> Any:
+        if isinstance(v, str):
+            return v.strip().lower()
+        return v
+
+    @field_validator("question", "target", "purpose")
+    @classmethod
+    def validate_non_empty(cls, v: str) -> str:
+        if not isinstance(v, str) or not v.strip():
+            raise ValueError("Field cannot be empty or whitespace only.")
+        return v.strip()
+
+    def to_dict(self) -> dict[str, Any]:
+        """Convert the task into a standard Python dictionary."""
+        return self.model_dump()
+
+

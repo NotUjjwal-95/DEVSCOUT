@@ -1,6 +1,6 @@
 """
 DEVSCOUT - AI-powered technical research and decision assistant.
-Integrated Demo: Requirement Analyzer -> Research Planner
+Integrated Demo: Requirement Analysis -> Research Planning -> Task Generation
 """
 
 import sys
@@ -12,11 +12,12 @@ if sys.stdout.encoding and sys.stdout.encoding.lower() != "utf-8":
 
 from analyzer import RequirementAnalyzer, AnalyzerError
 from planner import ResearchPlanner, PlannerError
+from task_generator import TaskGenerator
 
 
 def run_pipeline_demo():
     print("=" * 70)
-    print("DEVSCOUT: Requirement Analysis & Research Planning Pipeline")
+    print("DEVSCOUT: Requirements -> Plan -> Research Tasks Pipeline")
     print("=" * 70)
 
     # Sample Request 1: Collaborative Whiteboard
@@ -43,6 +44,7 @@ def run_pipeline_demo():
     try:
         analyzer = RequirementAnalyzer()
         planner = ResearchPlanner()
+        task_generator = TaskGenerator()
     except (AnalyzerError, PlannerError) as e:
         print(f"[Error initializing components]: {e}")
         return
@@ -70,24 +72,28 @@ def run_pipeline_demo():
             plan = planner.plan(analysis)
             print("\nValidated ResearchPlan:")
             print(json.dumps(plan.to_dict(), indent=2))
-
-            # Formatted Summary for quick inspection
-            print("\nSummary of Planned Investigations:")
-            print(f"Total Research Questions: {len(plan.research_questions)}")
-            print(f"Technologies to Investigate: {', '.join(plan.technologies_to_investigate)}")
-
-            for i, q in enumerate(plan.research_questions, start=1):
-                sources = ", ".join(q.source_types)
-                print(f"  {i}. [{q.priority.upper()}] ({sources}) {q.question}")
-                print(f"     Rationale: {q.rationale}")
-
         except PlannerError as e:
             print(f"[Research Planning Failed]: {e}")
             if hasattr(e, "raw_response") and e.raw_response:
                 print(f"Raw Response: {e.raw_response}")
+            continue
+
+        # Stage 3: Research Task Generation
+        print("\n--- [Stage 3] Generating Executable Research Tasks ---")
+        tasks = task_generator.generate_tasks(plan)
+        print(f"\nGenerated {len(tasks)} Atomic Research Tasks:")
+        print(json.dumps([t.to_dict() for t in tasks], indent=2))
+
+        print("\nBreakdown by Research Connector:")
+        for connector in ["web", "github", "rag"]:
+            connector_tasks = [t for t in tasks if t.source_type == connector]
+            print(f"  [{connector.upper()}] ({len(connector_tasks)} tasks):")
+            for t in connector_tasks:
+                print(f"    * [{t.priority.upper()}] (Target: {t.target}) {t.question}")
+                print(f"      Purpose: {t.purpose}")
 
     print("\n" + "=" * 70)
-    print("Pipeline Demo completed successfully.")
+    print("Full Pipeline Demo completed successfully.")
     print("=" * 70)
 
 
