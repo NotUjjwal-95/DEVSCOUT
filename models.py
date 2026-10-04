@@ -328,5 +328,94 @@ class GitHubResearchResult(BaseModel):
         return self.model_dump()
 
 
+class RAGResearchResult(BaseModel):
+    """
+    Normalized result from a RAG / vector knowledge base investigation for a research task.
+    """
+    title: str = Field(
+        ...,
+        description="Title or heading of the retrieved knowledge base document.",
+        min_length=1,
+    )
+    content: str = Field(
+        ...,
+        description="Relevant text content or passage excerpt from the knowledge base.",
+        min_length=1,
+    )
+    source: str = Field(
+        ...,
+        description="Originating source name, collection, or file path (e.g. 'internal-wiki', 'docs/arch.md').",
+        min_length=1,
+    )
+    doc_id: str | None = Field(
+        default=None,
+        description="Unique identifier of the vector/document record if available.",
+    )
+    score: float | None = Field(
+        default=None,
+        description="Relevance or similarity score returned by the vector provider.",
+    )
+    task_question: str = Field(
+        ...,
+        description="The research task question this knowledge addresses.",
+        min_length=1,
+    )
+    query: str = Field(
+        ...,
+        description="The query string executed to retrieve this result.",
+        min_length=1,
+    )
+
+    @model_validator(mode="before")
+    @classmethod
+    def normalize_aliases(cls, data: Any) -> Any:
+        if isinstance(data, dict):
+            # Normalize content / snippet alias
+            if "content" not in data and "snippet" in data:
+                data["content"] = data["snippet"]
+            # Normalize doc_id / id / document_id alias
+            if "doc_id" not in data and "id" in data:
+                data["doc_id"] = data["id"]
+            elif "doc_id" not in data and "document_id" in data:
+                data["doc_id"] = data["document_id"]
+        return data
+
+    @field_validator("title", "content", "source", "task_question", "query")
+    @classmethod
+    def validate_non_empty(cls, v: str) -> str:
+        if not isinstance(v, str) or not v.strip():
+            raise ValueError("Field cannot be empty or whitespace only.")
+        return v.strip()
+
+    @field_validator("doc_id", mode="before")
+    @classmethod
+    def validate_doc_id(cls, v: Any) -> str | None:
+        if v is None:
+            return None
+        s = str(v).strip()
+        return s if s else None
+
+    @field_validator("score", mode="before")
+    @classmethod
+    def validate_score(cls, v: Any) -> float | None:
+        if v is None:
+            return None
+        try:
+            val = float(v)
+            return val
+        except (ValueError, TypeError):
+            raise ValueError(f"Relevance score must be a valid numeric value, got: {v}")
+
+    @property
+    def snippet(self) -> str:
+        """Convenience property for content."""
+        return self.content
+
+    def to_dict(self) -> dict[str, Any]:
+        """Convert the result into a standard Python dictionary."""
+        return self.model_dump()
+
+
+
 
 

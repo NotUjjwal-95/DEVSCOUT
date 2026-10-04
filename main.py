@@ -15,11 +15,12 @@ from planner import ResearchPlanner, PlannerError
 from task_generator import TaskGenerator
 from web_researcher import WebResearcher, WebResearchError
 from github_researcher import GitHubResearcher, GitHubResearchError
+from rag_researcher import RAGResearcher, RAGResearchError
 
 
 def run_pipeline_demo():
     print("=" * 70)
-    print("DEVSCOUT: Requirements -> Plan -> Tasks -> Web & GitHub Research Pipeline")
+    print("DEVSCOUT: Requirements -> Plan -> Tasks -> Web, GitHub & RAG Research Pipeline")
     print("=" * 70)
 
     # Sample Request 1: Collaborative Whiteboard
@@ -49,7 +50,8 @@ def run_pipeline_demo():
         task_generator = TaskGenerator()
         web_researcher = WebResearcher(max_results_per_task=3)
         github_researcher = GitHubResearcher(max_results_per_task=3)
-    except (AnalyzerError, PlannerError, WebResearchError, GitHubResearchError) as e:
+        rag_researcher = RAGResearcher(max_results_per_task=3)
+    except (AnalyzerError, PlannerError, WebResearchError, GitHubResearchError, RAGResearchError) as e:
         print(f"[Error initializing components]: {e}")
         return
 
@@ -155,7 +157,39 @@ def run_pipeline_demo():
                 except GitHubResearchError as e:
                     print(f"  [GitHub Research Error]: {e}\n")
 
-        print("  [Notice] RAG research connector is deferred to upcoming milestones.")
+        # Stage 6: RAG Research (execute only rag tasks)
+        print("\n--- [Stage 6] Executing RAG Research (rag tasks only) ---")
+        high_priority_rag_tasks = [t for t in rag_tasks if t.priority == "high"]
+        selected_rag_tasks = high_priority_rag_tasks[:2] if high_priority_rag_tasks else rag_tasks[:2]
+
+        if not selected_rag_tasks:
+            print("  No RAG tasks generated for this request.\n")
+        else:
+            print(f"Executing knowledge base retrieval for {len(selected_rag_tasks)} RAG task(s):\n")
+            for task_idx, r_task in enumerate(selected_rag_tasks, start=1):
+                print(f"  [RAG Task {task_idx}/{len(selected_rag_tasks)}]")
+                print(f"  Question: {r_task.question}")
+                print(f"  Target:   {r_task.target}")
+                print(f"  Priority: {r_task.priority.upper()}")
+                print(f"  Query:    '{rag_researcher.build_query(r_task)}'")
+
+                try:
+                    rag_results = rag_researcher.search(r_task)
+                    print(f"  Retrieved {len(rag_results)} Knowledge Item(s):")
+                    for r_idx, res in enumerate(rag_results, start=1):
+                        score_str = f" (Score: {res.score:.4f})" if res.score is not None else ""
+                        doc_id_str = f" [{res.doc_id}]" if res.doc_id else ""
+                        print(f"    {r_idx}. [{res.source}]{doc_id_str} {res.title}{score_str}")
+                        if res.content:
+                            content_preview = res.content.replace("\n", " ")
+                            if len(content_preview) > 140:
+                                content_preview = content_preview[:140] + "..."
+                            print(f"       Content: {content_preview}")
+                    print()
+                except RAGResearchError as e:
+                    print(f"  [RAG Research Notice]: {e}\n")
+
+        print("  [Notice] Evidence Layer & Decision Engine are deferred to upcoming milestones.")
 
     print("\n" + "=" * 70)
     print("Full Pipeline Demo completed successfully.")
