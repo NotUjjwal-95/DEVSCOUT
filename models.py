@@ -732,45 +732,187 @@ class EvidenceContext(BaseModel):
         groups = data.get("evidence_groups") or []
         evidence_map = data.get("evidence_map") or {}
 
-        # If evidence_map is empty or missing, auto-index deterministically from groups
-        if not evidence_map and groups:
-            indexed_map: dict[str, Any] = {}
-            seen_identifiers: dict[str, str] = {}  # identifier -> ev_id
+        # Mappings for tracking and conflict detection
+        ev_id_to_ident: dict[str, str] = {}  # uppercase EV-xxx -> canonical lowercase identifier
+        ident_to_ev_id: dict[str, str] = {}  # canonical lowercase identifier -> uppercase EV-xxx
+        ev_id_to_item: dict[str, Any] = {}   # uppercase EV-xxx -> Evidence object or dict
 
+        def _get_ident(item: Any) -> str:
+            if hasattr(item, "identifier") and item.identifier:
+                return str(item.identifier).strip().lower()
+            if isinstance(item, dict):
+                if item.get("identifier"):
+                    return str(item["identifier"]).strip().lower()
+                ident = generate_stable_identifier(
+                    source_type=item.get("source_type", "unknown"),
+                    url=item.get("url"),
+                    doc_id=item.get("metadata", {}).get("doc_id") if isinstance(item.get("metadata"), dict) else None,
+                    repo_name=item.get("metadata", {}).get("repo_name") if isinstance(item.get("metadata"), dict) else None,
+                    title=str(item.get("title", "")),
+                    content=str(item.get("content", "")),
+                )
+                item["identifier"] = ident
+                return ident.strip().lower()
+            return ""
+
+        def _get_ev_id(item: Any) -> str | None:
+            if hasattr(item, "ev_id"):
+                return str(item.ev_id).strip() if item.ev_id else None
+            if isinstance(item, dict):
+                v = item.get("ev_id")
+                return str(v).strip() if v else None
+            return None
+
+        def _set_ev_id(item: Any, val: str) -> None:
+            if hasattr(item, "ev_id"):
+                item.ev_id = val
+            elif isinstance(item, dict):
+                item["ev_id"] = val
+
+        # Step 1: Inspect and register evidence_map if provided
+        if evidence_map and isinstance(evidence_map, dict):
+            for ref_id, item in list(evidence_map.items()):
+                ref_clean = str(ref_id).strip().upper()
+                if not re.match(r"^EV-\d{3,}$", ref_clean):
+                    raise ValueError(
+                        f"Invalid evidence reference key '{ref_id}' in evidence_map. Expected pattern 'EV-xxx' (e.g. 'EV-001')."
+                    )
+
+                ident = _get_ident(item)
+                if not ident:
+                    raise ValueError(f"Evidence item for '{ref_id}' in evidence_map lacks a valid identifier.")
+
+                item_ev_id = _get_ev_id(item)
+                if item_ev_id:
+                    item_ev_id_clean = item_ev_id.upper()
+                    if not re.match(r"^EV-\d{3,}$", item_ev_id_clean):
+                        raise ValueError(
+                            f"Invalid evidence reference ID format '{item_ev_id}' on Evidence object. Expected pattern 'EV-xxx'."
+                        )
+                    if item_ev_id_clean != ref_clean:
+                        raise ValueError(
+                            f"Mismatched evidence reference: key is '{ref_id}' but Evidence item has ev_id='{item_ev_id}'."
+                        )
+                _set_ev_id(item, ref_clean)
+
+                # Conflict Check 1: Duplicate EV ID claimed by different evidence
+                if ref_clean in ev_id_to_ident:
+                    if ev_id_to_ident[ref_clean] != ident:
+                        raise ValueError(
+                            f"Conflicting EV ID '{ref_clean}': assigned to both '{ev_id_to_ident[ref_clean]}' and '{ident}'. "
+                            f"No two different Evidence objects can claim the same EV ID."
+                        )
+                else:
+                    ev_id_to_ident[ref_clean] = ident
+
+                # Conflict Check 2: Same evidence claiming multiple EV IDs
+                if ident in ident_to_ev_id:
+                    if ident_to_ev_id[ident] != ref_clean:
+                        raise ValueError(
+                            f"Conflicting EV ID for evidence '{ident}': already assigned '{ident_to_ev_id[ident]}', "
+                            f"cannot also claim '{ref_clean}'. An Evidence item cannot have multiple EV IDs."
+                        )
+                else:
+                    ident_to_ev_id[ident] = ref_clean
+
+                ev_id_to_item[ref_clean] = item
+
+        # Collect all items from evidence_groups
+        group_items: list[Any] = []
+        if groups:
             for group in groups:
                 items = group.items if hasattr(group, "items") else (group.get("items", []) if isinstance(group, dict) else [])
                 for item in items:
-                    ident = item.identifier if hasattr(item, "identifier") else (item.get("identifier") if isinstance(item, dict) else None)
-                    if not ident:
-                        continue
-                    if ident in seen_identifiers:
-                        assigned_id = seen_identifiers[ident]
-                        if hasattr(item, "ev_id"):
-                            item.ev_id = assigned_id
-                        elif isinstance(item, dict):
-                            item["ev_id"] = assigned_id
-                    else:
-                        existing_ev_id = getattr(item, "ev_id", None) or (item.get("ev_id") if isinstance(item, dict) else None)
-                        if existing_ev_id and re.match(r"^EV-\d{3,}$", str(existing_ev_id).upper()):
-                            assigned_id = str(existing_ev_id).upper()
-                        else:
-                            assigned_id = f"EV-{len(seen_identifiers) + 1:03d}"
+                    group_items.append(item)
 
-                        if hasattr(item, "ev_id"):
-                            item.ev_id = assigned_id
-                        elif isinstance(item, dict):
-                            item["ev_id"] = assigned_id
+        # Step 2: Pass 1 on group_items - Validate & register all pre-existing ev_id values
+        for item in group_items:
+            existing_id = _get_ev_id(item)
+            if not existing_id:
+                continue
 
-                        seen_identifiers[ident] = assigned_id
-                        indexed_map[assigned_id] = item
+            norm_id = existing_id.upper()
+            if not re.match(r"^EV-\d{3,}$", norm_id):
+                raise ValueError(
+                    f"Invalid evidence reference ID format '{existing_id}'. Expected pattern 'EV-xxx' (e.g. 'EV-001')."
+                )
 
-            data["evidence_map"] = indexed_map
+            ident = _get_ident(item)
+            if not ident:
+                continue
+
+            # Conflict Check 1: Duplicate EV ID claimed by different evidence
+            if norm_id in ev_id_to_ident:
+                if ev_id_to_ident[norm_id] != ident:
+                    raise ValueError(
+                        f"Conflicting EV ID '{norm_id}': assigned to both '{ev_id_to_ident[norm_id]}' and '{ident}'. "
+                        f"No two different Evidence objects can claim the same EV ID."
+                    )
+            else:
+                ev_id_to_ident[norm_id] = ident
+
+            # Conflict Check 2: Same evidence claiming multiple EV IDs
+            if ident in ident_to_ev_id:
+                if ident_to_ev_id[ident] != norm_id:
+                    raise ValueError(
+                        f"Conflicting EV ID for evidence '{ident}': already assigned '{ident_to_ev_id[ident]}', "
+                        f"cannot also claim '{norm_id}'. An Evidence item cannot have multiple EV IDs."
+                    )
+            else:
+                ident_to_ev_id[ident] = norm_id
+
+            _set_ev_id(item, norm_id)
+            if norm_id not in ev_id_to_item:
+                ev_id_to_item[norm_id] = item
+
+        # Step 3: Pass 2 on group_items - Auto-assign EV IDs for items where ev_id is None
+        next_counter = 1
+        for item in group_items:
+            ident = _get_ident(item)
+            if not ident:
+                continue
+
+            existing_id = _get_ev_id(item)
+            if existing_id:
+                # Already registered in Pass 1, ensure assigned ID is consistent
+                assigned_id = ident_to_ev_id[ident]
+                _set_ev_id(item, assigned_id)
+                continue
+
+            # If this identifier was already assigned an EV ID (e.g. from Pass 1 or another group)
+            if ident in ident_to_ev_id:
+                assigned_id = ident_to_ev_id[ident]
+                _set_ev_id(item, assigned_id)
+                continue
+
+            # Find next available sequential EV ID not colliding with any pre-existing or auto-generated ID
+            while f"EV-{next_counter:03d}" in ev_id_to_ident:
+                next_counter += 1
+
+            assigned_id = f"EV-{next_counter:03d}"
+            next_counter += 1
+
+            ev_id_to_ident[assigned_id] = ident
+            ident_to_ev_id[ident] = assigned_id
+            ev_id_to_item[assigned_id] = item
+            _set_ev_id(item, assigned_id)
+
+        # Step 4: Populate evidence_map with clean, numerically sorted mapping
+        def _ev_sort_key(k: str) -> tuple[int, str]:
+            parts = k.split("-")
+            if len(parts) == 2 and parts[1].isdigit():
+                return (int(parts[1]), k)
+            return (999999, k)
+
+        sorted_map = {k: ev_id_to_item[k] for k in sorted(ev_id_to_item.keys(), key=_ev_sort_key)}
+        data["evidence_map"] = sorted_map
 
         return data
 
     @field_validator("evidence_map")
     @classmethod
     def validate_evidence_map(cls, v: dict[str, Evidence]) -> dict[str, Evidence]:
+        seen_idents: dict[str, str] = {}
         for ref_id, item in v.items():
             if not re.match(r"^EV-\d{3,}$", ref_id):
                 raise ValueError(
@@ -784,7 +926,32 @@ class EvidenceContext(BaseModel):
                 raise ValueError(
                     f"Mismatched evidence reference: key is '{ref_id}' but Evidence item has ev_id='{item.ev_id}'."
                 )
+            ident = item.identifier.strip().lower()
+            if ident in seen_idents:
+                raise ValueError(
+                    f"Duplicate evidence identifier in evidence_map: '{ident}' is mapped to both '{seen_idents[ident]}' and '{ref_id}'. "
+                    f"An Evidence item cannot have multiple EV IDs."
+                )
+            seen_idents[ident] = ref_id
         return v
+
+    @model_validator(mode="after")
+    def validate_group_and_map_consistency(self) -> "EvidenceContext":
+        for group in self.evidence_groups:
+            for item in group.items:
+                if not item.ev_id:
+                    raise ValueError(
+                        f"Evidence item '{item.identifier}' in group '{group.task_question}' has no ev_id assigned."
+                    )
+                if item.ev_id not in self.evidence_map:
+                    raise ValueError(f"Evidence item ev_id '{item.ev_id}' missing from evidence_map.")
+                map_item = self.evidence_map[item.ev_id]
+                if map_item.identifier.strip().lower() != item.identifier.strip().lower():
+                    raise ValueError(
+                        f"Mismatched evidence: item '{item.identifier}' in group '{group.task_question}' has ev_id '{item.ev_id}', "
+                        f"which resolves to '{map_item.identifier}' in evidence_map."
+                    )
+        return self
 
     def get_evidence(self, ev_id: str) -> Evidence:
         """

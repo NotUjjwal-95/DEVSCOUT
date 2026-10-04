@@ -7,6 +7,7 @@ for consumption by the future Reasoning Engine.
 
 import re
 from typing import Any, Sequence
+from pydantic import ValidationError
 
 from models import (
     Evidence,
@@ -25,7 +26,7 @@ class EvidenceContextError(Exception):
     pass
 
 
-class EvidenceContextValidationError(EvidenceContextError):
+class EvidenceContextValidationError(EvidenceContextError, ValueError):
     """Raised when context validation fails."""
     pass
 
@@ -43,7 +44,8 @@ def build_evidence_context(
     requirements, research plan, atomic tasks, and evidence grouped by research question.
 
     Assigns deterministic, human-readable reasoning reference IDs ('EV-001', 'EV-002', ...)
-    to each unique evidence item while preserving underlying provenance and identifiers.
+    to each unique evidence item while preserving underlying provenance, identifiers, and any
+    valid pre-existing ev_id values.
     """
     if not isinstance(user_request, str) or not user_request.strip():
         raise EvidenceContextValidationError("user_request must be a non-empty string.")
@@ -83,10 +85,6 @@ def build_evidence_context(
     else:
         groups = []
 
-    # Deterministically assign sequential reasoning references: EV-001, EV-002, ...
-    seen_identifiers: dict[str, str] = {}  # identifier -> ev_id
-    evidence_map: dict[str, Evidence] = {}
-
     for group in groups:
         for item in group.items:
             if not isinstance(item, Evidence):
@@ -94,25 +92,16 @@ def build_evidence_context(
                     f"Evidence group '{group.task_question}' contains non-Evidence item: {type(item).__name__}."
                 )
 
-            ident = item.identifier.strip().lower()
-            if ident in seen_identifiers:
-                # Reuse reference ID for identical evidence across questions
-                item.ev_id = seen_identifiers[ident]
-            else:
-                next_num = len(seen_identifiers) + 1
-                ev_id = f"EV-{next_num:03d}"
-                item.ev_id = ev_id
-                seen_identifiers[ident] = ev_id
-                evidence_map[ev_id] = item
-
-    return EvidenceContext(
-        user_request=user_request.strip(),
-        requirements=requirements,
-        plan=plan,
-        tasks=task_list,
-        evidence_groups=groups,
-        evidence_map=evidence_map,
-    )
+    try:
+        return EvidenceContext(
+            user_request=user_request.strip(),
+            requirements=requirements,
+            plan=plan,
+            tasks=task_list,
+            evidence_groups=groups,
+        )
+    except (ValidationError, ValueError) as err:
+        raise EvidenceContextValidationError(str(err)) from err
 
 
 def resolve_evidence_references(

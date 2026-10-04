@@ -438,6 +438,267 @@ class TestEvidenceContextContract(unittest.TestCase):
         md_prompt = format_evidence_context_for_prompt(context)
         self.assertEqual(md, md_prompt)
 
+    def test_duplicate_ev_id_with_different_evidence_raises_validation_error(self):
+        """Test 1: duplicate EV ID + different evidence raises validation error."""
+        ev_diff_1 = Evidence(
+            source_type="web",
+            title="AWS Kinesis Architectural Patterns",
+            content="Overview of AWS Kinesis shard limits and streaming patterns.",
+            url="https://aws.amazon.com/kinesis/patterns",
+            source="aws.amazon.com",
+            task_question=self.q1.question,
+            query="AWS Kinesis patterns",
+            ev_id="EV-001",
+        )
+        ev_diff_2 = Evidence(
+            source_type="github",
+            title="apache/kafka",
+            content="Mirror of Apache Kafka repository on GitHub.",
+            url="https://github.com/apache/kafka",
+            source="apache/kafka",
+            task_question=self.q1.question,
+            query="apache kafka repo",
+            ev_id="EV-001",  # Same EV ID but completely different evidence
+        )
+
+        # In build_evidence_context
+        with self.assertRaises(EvidenceContextValidationError) as ctx_err:
+            build_evidence_context(
+                user_request=self.user_request,
+                requirements=self.requirements,
+                plan=self.plan,
+                tasks=self.tasks,
+                evidence_groups=[
+                    EvidenceGroup(task_question=self.q1.question, items=[ev_diff_1, ev_diff_2])
+                ],
+            )
+        self.assertIn("Conflicting EV ID 'EV-001'", str(ctx_err.exception))
+
+        # In direct EvidenceContext instantiation
+        with self.assertRaises(ValidationError) as pydantic_err:
+            EvidenceContext(
+                user_request=self.user_request,
+                requirements=self.requirements,
+                plan=self.plan,
+                tasks=self.tasks,
+                evidence_groups=[
+                    EvidenceGroup(task_question=self.q1.question, items=[ev_diff_1, ev_diff_2])
+                ],
+            )
+        self.assertIn("Conflicting EV ID 'EV-001'", str(pydantic_err.exception))
+
+    def test_duplicate_ev_id_with_same_evidence_accepted(self):
+        """Test 2: duplicate EV ID + same evidence is accepted and preserves single reference."""
+        ev_same_1 = Evidence(
+            source_type="web",
+            title="Kinesis vs Kafka Benchmark",
+            content="Throughput and cost comparison between Kinesis and Kafka.",
+            url="https://example.com/kinesis-vs-kafka",
+            source="example.com",
+            task_question=self.q1.question,
+            query="kinesis vs kafka",
+            ev_id="EV-001",
+        )
+        ev_same_2 = Evidence(
+            source_type="web",
+            title="Kinesis vs Kafka Benchmark",
+            content="Throughput and cost comparison between Kinesis and Kafka.",
+            url="https://example.com/kinesis-vs-kafka",
+            source="example.com",
+            task_question=self.q2.question,
+            query="kinesis vs kafka",
+            ev_id="EV-001",  # Same EV ID and same underlying evidence identifier
+        )
+
+        group_a = EvidenceGroup(task_question=self.q1.question, items=[ev_same_1])
+        group_b = EvidenceGroup(task_question=self.q2.question, items=[ev_same_2])
+
+        # build_evidence_context
+        context = build_evidence_context(
+            user_request=self.user_request,
+            requirements=self.requirements,
+            plan=self.plan,
+            tasks=self.tasks,
+            evidence_groups=[group_a, group_b],
+        )
+
+        self.assertEqual(context.total_evidence_count, 1)
+        self.assertEqual(list(context.evidence_map.keys()), ["EV-001"])
+        self.assertEqual(context.resolve_reference("EV-001").identifier, ev_same_1.identifier)
+        self.assertEqual(group_a.items[0].ev_id, "EV-001")
+        self.assertEqual(group_b.items[0].ev_id, "EV-001")
+
+        # Direct EvidenceContext instantiation
+        direct_context = EvidenceContext(
+            user_request=self.user_request,
+            requirements=self.requirements,
+            plan=self.plan,
+            tasks=self.tasks,
+            evidence_groups=[group_a, group_b],
+        )
+        self.assertEqual(direct_context.total_evidence_count, 1)
+        self.assertEqual(direct_context.resolve_reference("EV-001").identifier, ev_same_1.identifier)
+
+    def test_valid_pre_existing_ev_ids_preserved(self):
+        """Test 3: valid pre-existing EV IDs are preserved in context."""
+        ev1 = Evidence(
+            source_type="web",
+            title="Doc 1",
+            content="Content 1",
+            url="https://example.com/1",
+            source="example.com",
+            task_question=self.q1.question,
+            query="query 1",
+            ev_id="EV-001",
+        )
+        ev2 = Evidence(
+            source_type="github",
+            title="org/repo",
+            content="Content 2",
+            url="https://github.com/org/repo",
+            source="github.com",
+            task_question=self.q1.question,
+            query="query 2",
+            ev_id="EV-005",
+        )
+        ev3 = Evidence(
+            source_type="rag",
+            title="Doc 3",
+            content="Content 3",
+            source="wiki",
+            task_question=self.q2.question,
+            query="query 3",
+            ev_id="EV-010",
+        )
+
+        group = EvidenceGroup(task_question="Questions", items=[ev1, ev2, ev3])
+        context = build_evidence_context(
+            user_request=self.user_request,
+            requirements=self.requirements,
+            plan=self.plan,
+            tasks=self.tasks,
+            evidence_groups=[group],
+        )
+
+        self.assertEqual(context.total_evidence_count, 3)
+        self.assertEqual(list(context.evidence_map.keys()), ["EV-001", "EV-005", "EV-010"])
+        self.assertEqual(context.resolve_reference("EV-001").identifier, ev1.identifier)
+        self.assertEqual(context.resolve_reference("EV-005").identifier, ev2.identifier)
+        self.assertEqual(context.resolve_reference("EV-010").identifier, ev3.identifier)
+
+        self.assertEqual(ev1.ev_id, "EV-001")
+        self.assertEqual(ev2.ev_id, "EV-005")
+        self.assertEqual(ev3.ev_id, "EV-010")
+
+    def test_mixed_pre_existing_and_auto_generated_ids(self):
+        """Test 4: mixed pre-existing and auto-generated IDs do not collide."""
+        ev_pre_1 = Evidence(
+            source_type="web",
+            title="Pre-existing Item 1",
+            content="Content A",
+            url="https://example.com/pre-1",
+            source="example.com",
+            task_question=self.q1.question,
+            query="query",
+            ev_id="EV-002",
+        )
+        ev_auto_1 = Evidence(
+            source_type="web",
+            title="Auto Item 1",
+            content="Content B",
+            url="https://example.com/auto-1",
+            source="example.com",
+            task_question=self.q1.question,
+            query="query",
+            ev_id=None,
+        )
+        ev_pre_2 = Evidence(
+            source_type="github",
+            title="org/repo-pre",
+            content="Content C",
+            url="https://github.com/org/repo-pre",
+            source="github.com",
+            task_question=self.q2.question,
+            query="query",
+            ev_id="EV-004",
+        )
+        ev_auto_2 = Evidence(
+            source_type="rag",
+            title="Auto Item 2",
+            content="Content D",
+            source="wiki",
+            task_question=self.q2.question,
+            query="query",
+            ev_id=None,
+        )
+
+        context = build_evidence_context(
+            user_request=self.user_request,
+            requirements=self.requirements,
+            plan=self.plan,
+            tasks=self.tasks,
+            evidence_groups=[
+                EvidenceGroup(task_question=self.q1.question, items=[ev_pre_1, ev_auto_1]),
+                EvidenceGroup(task_question=self.q2.question, items=[ev_pre_2, ev_auto_2]),
+            ],
+        )
+
+        self.assertEqual(context.total_evidence_count, 4)
+        # Pre-existing IDs are preserved
+        self.assertEqual(ev_pre_1.ev_id, "EV-002")
+        self.assertEqual(ev_pre_2.ev_id, "EV-004")
+
+        # Auto-generated IDs fill gaps without colliding: EV-001 and EV-003
+        self.assertEqual(ev_auto_1.ev_id, "EV-001")
+        self.assertEqual(ev_auto_2.ev_id, "EV-003")
+
+        # All 4 IDs are unique and mapped correctly
+        ev_keys = list(context.evidence_map.keys())
+        self.assertEqual(len(ev_keys), 4)
+        self.assertEqual(len(set(ev_keys)), 4)
+        self.assertEqual(ev_keys, ["EV-001", "EV-002", "EV-003", "EV-004"])
+
+        self.assertEqual(context.resolve_reference("EV-001").identifier, ev_auto_1.identifier)
+        self.assertEqual(context.resolve_reference("EV-002").identifier, ev_pre_1.identifier)
+        self.assertEqual(context.resolve_reference("EV-003").identifier, ev_auto_2.identifier)
+        self.assertEqual(context.resolve_reference("EV-004").identifier, ev_pre_2.identifier)
+
+    def test_same_evidence_with_conflicting_ev_ids_raises_error(self):
+        """Test conflicting EV IDs on the same evidence raises validation error."""
+        ev_conflict_1 = Evidence(
+            source_type="web",
+            title="Doc Conflict",
+            content="Content",
+            url="https://example.com/conflict",
+            source="example.com",
+            task_question=self.q1.question,
+            query="query",
+            ev_id="EV-001",
+        )
+        ev_conflict_2 = Evidence(
+            source_type="web",
+            title="Doc Conflict",
+            content="Content",
+            url="https://example.com/conflict",
+            source="example.com",
+            task_question=self.q2.question,
+            query="query",
+            ev_id="EV-002",  # Same identifier, conflicting EV ID
+        )
+
+        with self.assertRaises(EvidenceContextValidationError) as ctx_err:
+            build_evidence_context(
+                user_request=self.user_request,
+                requirements=self.requirements,
+                plan=self.plan,
+                tasks=self.tasks,
+                evidence_groups=[
+                    EvidenceGroup(task_question=self.q1.question, items=[ev_conflict_1]),
+                    EvidenceGroup(task_question=self.q2.question, items=[ev_conflict_2]),
+                ],
+            )
+        self.assertIn("Conflicting EV ID for evidence", str(ctx_err.exception))
+
 
 if __name__ == "__main__":
     unittest.main()
