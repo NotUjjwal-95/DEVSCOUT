@@ -16,6 +16,7 @@ from task_generator import TaskGenerator
 from web_researcher import WebResearcher, WebResearchError
 from github_researcher import GitHubResearcher, GitHubResearchError
 from rag_researcher import RAGResearcher, RAGResearchError
+from evidence_layer import EvidenceLayer, EvidenceError
 
 
 def run_pipeline_demo():
@@ -51,7 +52,8 @@ def run_pipeline_demo():
         web_researcher = WebResearcher(max_results_per_task=3)
         github_researcher = GitHubResearcher(max_results_per_task=3)
         rag_researcher = RAGResearcher(max_results_per_task=3)
-    except (AnalyzerError, PlannerError, WebResearchError, GitHubResearchError, RAGResearchError) as e:
+        evidence_layer = EvidenceLayer(deduplicate=True, rank=True)
+    except (AnalyzerError, PlannerError, WebResearchError, GitHubResearchError, RAGResearchError, EvidenceError) as e:
         print(f"[Error initializing components]: {e}")
         return
 
@@ -95,6 +97,8 @@ def run_pipeline_demo():
 
         print(f"Task Breakdown: {len(web_tasks)} Web, {len(github_tasks)} GitHub, {len(rag_tasks)} RAG.")
 
+        collected_research_results: list[tuple[Any, str]] = []
+
         # Stage 4: Web Research (execute only web tasks)
         print("\n--- [Stage 4] Executing Web Research (web tasks only) ---")
         # For concise demo execution, execute top high-priority web tasks
@@ -114,6 +118,7 @@ def run_pipeline_demo():
                 results = web_researcher.search(web_task)
                 print(f"  Retrieved {len(results)} Web Sources:")
                 for r_idx, res in enumerate(results, start=1):
+                    collected_research_results.append((res, web_task.priority))
                     print(f"    {r_idx}. [{res.source}] {res.title}")
                     print(f"       URL: {res.url}")
                     if res.snippet:
@@ -145,6 +150,7 @@ def run_pipeline_demo():
                     gh_results = github_researcher.search(gh_task)
                     print(f"  Retrieved {len(gh_results)} Repositories:")
                     for r_idx, res in enumerate(gh_results, start=1):
+                        collected_research_results.append((res, gh_task.priority))
                         lang_str = f" | {res.language}" if res.language else ""
                         print(f"    {r_idx}. [{res.owner}] {res.repo_name} (★ {res.stars:,} | Forks: {res.forks:,}{lang_str})")
                         print(f"       URL: {res.url}")
@@ -177,6 +183,7 @@ def run_pipeline_demo():
                     rag_results = rag_researcher.search(r_task)
                     print(f"  Retrieved {len(rag_results)} Knowledge Item(s):")
                     for r_idx, res in enumerate(rag_results, start=1):
+                        collected_research_results.append((res, r_task.priority))
                         score_str = f" (Score: {res.score:.4f})" if res.score is not None else ""
                         doc_id_str = f" [{res.doc_id}]" if res.doc_id else ""
                         print(f"    {r_idx}. [{res.source}]{doc_id_str} {res.title}{score_str}")
@@ -189,7 +196,57 @@ def run_pipeline_demo():
                 except RAGResearchError as e:
                     print(f"  [RAG Research Notice]: {e}\n")
 
-        print("  [Notice] Evidence Layer & Decision Engine are deferred to upcoming milestones.")
+        # Stage 7: Evidence Layer (Normalize, Deduplicate, Rank, and Group)
+        print("\n--- [Stage 7] Processing Evidence Layer ---")
+        if not collected_research_results:
+            print("  No research results retrieved to process into evidence.\n")
+        else:
+            total_collected = len(collected_research_results)
+
+            # 1. Normalize
+            raw_evidence = [
+                evidence_layer.normalize([res], task_priority=prio)[0]
+                for res, prio in collected_research_results
+            ]
+
+            # 2. Deduplicate
+            deduped_evidence = evidence_layer.deduplicate_items(raw_evidence)
+            duplicates_removed = total_collected - len(deduped_evidence)
+
+            # 3. Group and Rank
+            evidence_groups = evidence_layer.group_items(deduped_evidence)
+            total_canonical = sum(g.total_count for g in evidence_groups)
+
+            web_count = sum(g.web_count for g in evidence_groups)
+            github_count = sum(g.github_count for g in evidence_groups)
+            rag_count = sum(g.rag_count for g in evidence_groups)
+
+            print(f"Evidence Ingestion Summary:")
+            print(f"  Total Ingested:    {total_collected}")
+            print(f"  Duplicates Pruned: {duplicates_removed}")
+            print(f"  Canonical Items:   {total_canonical} ({web_count} Web, {github_count} GitHub, {rag_count} RAG)")
+            print(f"  Questions Covered: {len(evidence_groups)}\n")
+
+            print("Grouped & Ranked Evidence Repository:")
+            for g_idx, group in enumerate(evidence_groups, start=1):
+                print(f"  [Evidence Group {g_idx}/{len(evidence_groups)}]")
+                print(f"  Question: \"{group.task_question}\"")
+                print(f"  Evidence Items ({group.total_count} total: {group.web_count} Web, {group.github_count} GitHub, {group.rag_count} RAG):")
+                for item_idx, ev in enumerate(group.items, start=1):
+                    badge = f"[{ev.source_type.upper()}]"
+                    score_display = f" (Rank Score: {ev.rank_score:.4f})"
+                    print(f"    {item_idx}. {badge} {ev.title}{score_display}")
+                    if ev.url:
+                        print(f"       URL: {ev.url}")
+                    print(f"       Source: {ev.source} | Priority: {ev.task_priority.upper()}")
+                    if ev.content:
+                        content_preview = ev.content.replace("\n", " ")
+                        if len(content_preview) > 130:
+                            content_preview = content_preview[:130] + "..."
+                        print(f"       Excerpt: {content_preview}")
+                print()
+
+        print("  [Notice] Evidence Layer completed. Decision & Reasoning Engine are deferred to upcoming milestones.")
 
     print("\n" + "=" * 70)
     print("Full Pipeline Demo completed successfully.")

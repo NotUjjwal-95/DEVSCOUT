@@ -2,6 +2,8 @@
 Data models and schemas for DEVSCOUT.
 """
 
+import hashlib
+import re
 from typing import Any, Literal
 from urllib.parse import urlparse
 from pydantic import BaseModel, Field, field_validator, model_validator
@@ -414,6 +416,236 @@ class RAGResearchResult(BaseModel):
     def to_dict(self) -> dict[str, Any]:
         """Convert the result into a standard Python dictionary."""
         return self.model_dump()
+
+
+def generate_stable_identifier(
+    source_type: str,
+    url: str | None = None,
+    doc_id: str | None = None,
+    repo_name: str | None = None,
+    title: str = "",
+    content: str = "",
+) -> str:
+    """
+    Generate a deterministic, canonical identifier for an evidence item.
+    """
+    st = (source_type or "unknown").strip().lower()
+    if st == "github":
+        if repo_name and repo_name.strip():
+            return f"github:{repo_name.strip().lower()}"
+        if url and url.strip():
+            clean_url = url.strip().lower().rstrip("/")
+            parsed = urlparse(clean_url)
+            path = parsed.path.strip("/")
+            if path:
+                return f"github:{path}"
+            return f"github:{clean_url}"
+    elif st == "web":
+        if url and url.strip():
+            clean_url = url.strip().lower().rstrip("/")
+            return f"web:{clean_url}"
+    elif st == "rag":
+        if doc_id and doc_id.strip():
+            return f"rag:{doc_id.strip().lower()}"
+        if url and url.strip():
+            return f"rag:{url.strip().lower().rstrip('/')}"
+
+    norm_content = re.sub(r"\s+", " ", f"{title} {content[:200]}").strip().lower()
+    content_hash = hashlib.sha256(norm_content.encode("utf-8")).hexdigest()[:16]
+    return f"{st}:{content_hash}"
+
+
+class Evidence(BaseModel):
+    """
+    Canonical representation of a piece of research evidence collected from
+    Web, GitHub, or RAG sources, preserving provenance and supporting ranking.
+    """
+    source_type: SourceType = Field(
+        ...,
+        description="Source connector that gathered this evidence: 'web', 'github', or 'rag'.",
+    )
+    title: str = Field(
+        ...,
+        description="Title, headline, or repository identifier of the evidence.",
+        min_length=1,
+    )
+    content: str = Field(
+        ...,
+        description="Substantive text content, excerpt, description, or snippet.",
+        min_length=1,
+    )
+    url: str | None = Field(
+        default=None,
+        description="Canonical URL or web link to the evidence if applicable.",
+    )
+    source: str = Field(
+        ...,
+        description="Originating source identifier (e.g. domain name, repository owner/name, document collection).",
+        min_length=1,
+    )
+    identifier: str = Field(
+        default="",
+        description="Deterministic, unique identifier for deduplication (e.g. 'web:url', 'github:owner/repo', 'rag:doc-id').",
+    )
+    task_question: str = Field(
+        ...,
+        description="The research task question this evidence directly addresses.",
+        min_length=1,
+    )
+    task_priority: PriorityLevel = Field(
+        default="medium",
+        description="Priority level of the originating research task ('high', 'medium', 'low').",
+    )
+    query: str = Field(
+        ...,
+        description="The exact query executed that produced this evidence item.",
+        min_length=1,
+    )
+    relevance_score: float | None = Field(
+        default=None,
+        description="Explicit relevance or similarity score from the underlying retrieval provider if available.",
+    )
+    rank_score: float = Field(
+        default=0.0,
+        description="Deterministic composite rank score calculated by the Evidence Layer.",
+    )
+    metadata: dict[str, Any] = Field(
+        default_factory=dict,
+        description="Source-specific metadata attributes (e.g. stars, forks, language, doc_id).",
+    )
+
+    @model_validator(mode="before")
+    @classmethod
+    def normalize_evidence_data(cls, data: Any) -> Any:
+        if isinstance(data, dict):
+            # Normalize source_type
+            if "source_type" in data and isinstance(data["source_type"], str):
+                data["source_type"] = data["source_type"].strip().lower()
+            # Normalize task_priority
+            if "task_priority" in data and isinstance(data["task_priority"], str):
+                data["task_priority"] = data["task_priority"].strip().lower()
+            # Normalize content from aliases
+            if "content" not in data or not data["content"]:
+                if "description" in data and data["description"]:
+                    data["content"] = str(data["description"]).strip()
+                elif "snippet" in data and data["snippet"]:
+                    data["content"] = str(data["snippet"]).strip()
+            # Auto-infer source if missing
+            if "source" not in data or not data["source"]:
+                st = data.get("source_type")
+                if st == "github":
+                    data["source"] = data.get("metadata", {}).get("repo_name") or "github.com"
+                elif st == "web" and data.get("url"):
+                    data["source"] = urlparse(data["url"]).netloc or "web"
+                elif st == "rag":
+                    data["source"] = "rag-knowledge-base"
+                else:
+                    data["source"] = "unknown"
+            # Auto-infer identifier if missing or empty
+            if "identifier" not in data or not data["identifier"]:
+                data["identifier"] = generate_stable_identifier(
+                    source_type=data.get("source_type", "unknown"),
+                    url=data.get("url"),
+                    doc_id=data.get("metadata", {}).get("doc_id"),
+                    repo_name=data.get("metadata", {}).get("repo_name"),
+                    title=str(data.get("title", "")),
+                    content=str(data.get("content", "")),
+                )
+        return data
+
+    @field_validator("title", "content", "source", "identifier", "task_question", "query")
+    @classmethod
+    def validate_non_empty(cls, v: str) -> str:
+        if not isinstance(v, str) or not v.strip():
+            raise ValueError("Field cannot be empty or whitespace only.")
+        return v.strip()
+
+    @field_validator("url")
+    @classmethod
+    def validate_url_if_present(cls, v: str | None) -> str | None:
+        if v is None:
+            return None
+        v_clean = v.strip()
+        if not v_clean:
+            return None
+        parsed = urlparse(v_clean)
+        if parsed.scheme.lower() not in ("http", "https") or not parsed.netloc:
+            raise ValueError(f"URL must have a valid http or https scheme and host: '{v}'")
+        return v_clean
+
+    @field_validator("relevance_score", "rank_score", mode="before")
+    @classmethod
+    def normalize_scores(cls, v: Any) -> float | None:
+        if v is None:
+            return None
+        try:
+            return float(v)
+        except (ValueError, TypeError):
+            raise ValueError(f"Score must be a valid numeric value, got: {v}")
+
+    @property
+    def description(self) -> str:
+        """Alias property for content."""
+        return self.content
+
+    @property
+    def snippet(self) -> str:
+        """Alias property for content."""
+        return self.content
+
+    def to_dict(self) -> dict[str, Any]:
+        """Convert the model into a standard Python dictionary."""
+        return self.model_dump()
+
+
+class EvidenceGroup(BaseModel):
+    """
+    Collection of normalized evidence items grouped under a specific research question.
+    """
+    task_question: str = Field(
+        ...,
+        description="The research question grouping these evidence items.",
+        min_length=1,
+    )
+    items: list[Evidence] = Field(
+        default_factory=list,
+        description="List of evidence items addressing this question.",
+    )
+
+    @field_validator("task_question")
+    @classmethod
+    def validate_task_question(cls, v: str) -> str:
+        if not isinstance(v, str) or not v.strip():
+            raise ValueError("task_question cannot be empty.")
+        return v.strip()
+
+    @property
+    def total_count(self) -> int:
+        return len(self.items)
+
+    @property
+    def web_count(self) -> int:
+        return sum(1 for e in self.items if e.source_type == "web")
+
+    @property
+    def github_count(self) -> int:
+        return sum(1 for e in self.items if e.source_type == "github")
+
+    @property
+    def rag_count(self) -> int:
+        return sum(1 for e in self.items if e.source_type == "rag")
+
+    def by_source_type(self) -> dict[SourceType, list[Evidence]]:
+        """Return evidence items partitioned by source type."""
+        grouped: dict[SourceType, list[Evidence]] = {"web": [], "github": [], "rag": []}
+        for item in self.items:
+            grouped[item.source_type].append(item)
+        return grouped
+
+    def to_dict(self) -> dict[str, Any]:
+        """Convert the group into a standard Python dictionary."""
+        return self.model_dump()
+
 
 
 
