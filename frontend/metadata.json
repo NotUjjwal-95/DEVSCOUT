@@ -1,0 +1,6 @@
+{
+  "name": "DEVSCOUT",
+  "description": "AI-powered technical research and decision assistant for software engineering problems and architecture trade-offs.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
