@@ -3,7 +3,6 @@ Web Research connector for DEVSCOUT.
 Executes targeted web research for tasks requiring external web intelligence.
 """
 
-import os
 import re
 from typing import Any, Protocol, runtime_checkable
 from urllib.parse import urlparse
@@ -201,15 +200,20 @@ class WebResearcher:
         if not query:
             raise WebSearchValidationError("Failed to derive a valid search query from task.")
 
-        raw_items = self.provider.search(query, max_results=self.max_results_per_task)
+        try:
+            raw_items = self.provider.search(query, max_results=self.max_results_per_task)
 
-        # If primary query returned no results and target is specific, retry with target alone
-        if not raw_items and task.target and task.target.lower() not in {
-            "architecture & implementation",
-            "architecture",
-            "implementation",
-        } and task.target != query:
-            raw_items = self.provider.search(task.target, max_results=self.max_results_per_task)
+            # If primary query returned no results and target is specific, retry with target alone
+            if not raw_items and task.target and task.target.lower() not in {
+                "architecture & implementation",
+                "architecture",
+                "implementation",
+            } and task.target != query:
+                raw_items = self.provider.search(task.target, max_results=self.max_results_per_task)
+        except WebSearchConnectionError:
+            raise
+        except Exception as e:
+            raise WebSearchConnectionError(f"Web search provider error: {e}") from e
 
         results: list[WebResearchResult] = []
         for item in raw_items:

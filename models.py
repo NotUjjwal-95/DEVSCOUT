@@ -3,6 +3,7 @@ Data models and schemas for DEVSCOUT.
 """
 
 from typing import Any, Literal
+from urllib.parse import urlparse
 from pydantic import BaseModel, Field, field_validator
 
 
@@ -201,6 +202,14 @@ class WebResearchResult(BaseModel):
         if not isinstance(v, str) or not v.strip():
             raise ValueError("Field cannot be empty or whitespace only.")
         return v.strip()
+
+    @field_validator("url")
+    @classmethod
+    def validate_http_url(cls, v: str) -> str:
+        parsed = urlparse(v)
+        if parsed.scheme.lower() not in ("http", "https") or not parsed.netloc:
+            raise ValueError(f"URL must have a valid http or https scheme and host: '{v}'")
+        return v
 
     def to_dict(self) -> dict[str, Any]:
         """Convert the result into a standard Python dictionary."""

@@ -4,11 +4,10 @@ Uses mock search providers to guarantee fast, deterministic, offline execution.
 """
 
 import unittest
-from unittest.mock import MagicMock
+from pydantic import ValidationError
 from models import ResearchTask, WebResearchResult
 from web_researcher import (
     WebResearcher,
-    WebResearchError,
     WebSearchConnectionError,
     WebSearchValidationError,
     research_web_task,
@@ -67,6 +66,61 @@ class TestWebResearchResultSchema(unittest.TestCase):
                 task_question="A question?",
                 query="A query",
             )
+
+    def test_invalid_url_scheme_rejected(self):
+        # Non-http/https schemes must be rejected
+        for bad_url in [
+            "ftp://example.com/resource",
+            "file:///path/to/file.txt",
+            "javascript:alert(1)",
+            "data:text/plain;base64,SGVsbG8=",
+        ]:
+            with self.subTest(bad_url=bad_url):
+                with self.assertRaises(ValidationError):
+                    WebResearchResult(
+                        title="Valid Title",
+                        url=bad_url,
+                        source="example.com",
+                        task_question="Valid question?",
+                        query="valid query",
+                    )
+
+    def test_missing_scheme_or_host_rejected(self):
+        # Missing scheme or host must be rejected
+        for bad_url in [
+            "example.com",
+            "www.example.com",
+            "https://",
+            "http://",
+            "not a url at all",
+        ]:
+            with self.subTest(bad_url=bad_url):
+                with self.assertRaises(ValidationError):
+                    WebResearchResult(
+                        title="Valid Title",
+                        url=bad_url,
+                        source="example.com",
+                        task_question="Valid question?",
+                        query="valid query",
+                    )
+
+    def test_valid_http_and_https_urls_accepted(self):
+        valid_urls = [
+            "http://example.com",
+            "https://example.com",
+            "https://subdomain.domain.org/path?param=1#fragment",
+            "http://localhost:8080/metrics",
+        ]
+        for valid_url in valid_urls:
+            with self.subTest(valid_url=valid_url):
+                result = WebResearchResult(
+                    title="Valid Title",
+                    url=valid_url,
+                    source="example.com",
+                    task_question="Valid question?",
+                    query="valid query",
+                )
+                self.assertEqual(result.url, valid_url)
 
 
 class TestWebResearcher(unittest.TestCase):
@@ -153,6 +207,40 @@ class TestWebResearcher(unittest.TestCase):
         researcher = WebResearcher(provider=provider)
 
         with self.assertRaises(WebSearchConnectionError):
+            researcher.search(self.valid_web_task)
+
+    def test_unexpected_provider_exception_normalized_to_connection_error(self):
+        # Arbitrary runtime exceptions from provider must be normalized into WebSearchConnectionError
+        provider = MockSearchProvider(error_to_raise=RuntimeError("Search engine socket timeout"))
+        researcher = WebResearcher(provider=provider)
+
+        with self.assertRaises(WebSearchConnectionError) as ctx:
+            researcher.search(self.valid_web_task)
+        self.assertIn("Search engine socket timeout", str(ctx.exception))
+
+    def test_provider_custom_network_exception_normalized(self):
+        # Specific connection/IO exceptions must be normalized into WebSearchConnectionError
+        provider = MockSearchProvider(error_to_raise=ConnectionResetError("Connection reset by peer"))
+        researcher = WebResearcher(provider=provider)
+
+        with self.assertRaises(WebSearchConnectionError) as ctx:
+            researcher.search(self.valid_web_task)
+        self.assertIn("Connection reset by peer", str(ctx.exception))
+
+    def test_provider_invalid_url_result_raises_validation_error(self):
+        # Provider returns items with invalid URL scheme (e.g. ftp://)
+        invalid_url_data = [
+            {
+                "title": "Invalid Scheme Link",
+                "url": "ftp://files.example.com/archive.zip",
+                "source": "example.com",
+                "snippet": "Some snippet",
+            }
+        ]
+        provider = MockSearchProvider(return_results=invalid_url_data)
+        researcher = WebResearcher(provider=provider)
+
+        with self.assertRaises(WebSearchValidationError):
             researcher.search(self.valid_web_task)
 
     def test_correct_query_construction(self):
